@@ -1715,12 +1715,31 @@ export class TaskService {
         let totalActiveTimers = 0;
         let completedTasksCount = 0;
 
+        const employeeAggregates: Record<string, { employee: any; totalWorkedSeconds: number; taskCount: number; completedCount: number }> = {};
+        const statusCounts: Record<string, number> = { TODO: 0, IN_PROGRESS: 0, PAUSED: 0, COMPLETED: 0, CANCELLED: 0 };
+
         for (const task of tasks || []) {
           const timers = task.timers || [];
           const taskWorked = TaskService.calculateTaskWorkedSeconds(timers, now);
           totalWorkedSeconds += taskWorked;
           if (timers.some((t: any) => t.isActive ?? t.is_active)) totalActiveTimers++;
           if (task.status === 'COMPLETED') completedTasksCount++;
+          if (statusCounts[task.status] !== undefined) statusCounts[task.status]++;
+
+          const empId = task.employee_id || task.employeeId;
+          if (empId) {
+            if (!employeeAggregates[empId]) {
+              employeeAggregates[empId] = {
+                employee: task.employee,
+                totalWorkedSeconds: 0,
+                taskCount: 0,
+                completedCount: 0,
+              };
+            }
+            employeeAggregates[empId].totalWorkedSeconds += taskWorked;
+            employeeAggregates[empId].taskCount++;
+            if (task.status === 'COMPLETED') employeeAggregates[empId].completedCount++;
+          }
         }
 
         return {
@@ -1730,6 +1749,12 @@ export class TaskService {
           totalWorkedSeconds,
           totalWorkedMinutes: Math.floor(totalWorkedSeconds / 60),
           totalWorkedHours: parseFloat((totalWorkedSeconds / 3600).toFixed(2)),
+          statusBreakdown: statusCounts,
+          employeeBreakdown: Object.values(employeeAggregates).map((item) => ({
+            ...item,
+            totalWorkedMinutes: Math.floor(item.totalWorkedSeconds / 60),
+            totalWorkedHours: parseFloat((item.totalWorkedSeconds / 3600).toFixed(2)),
+          })),
         };
       }
     );
