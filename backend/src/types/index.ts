@@ -37,12 +37,18 @@ export type AuditAction =
   | 'SESSION_REVOKED';
 
 // Session Access Mode for Attendance-Gated Access and First Login
+export * from './rbac.js';
+import { AppRole, Permission, AdminScope } from './rbac.js';
+
 export type AccessMode = 'NORMAL' | 'RESTRICTED' | 'FIRST_LOGIN_REQUIRED';
 
 export interface AuthUser {
   id: string;
   email: string;
   role: UserRole;
+  appRole?: AppRole;
+  permissions?: Permission[];
+  scope?: AdminScope | null;
   status: UserStatus;
   employeeId?: string | null;
   employeeCode?: string | null;
@@ -183,6 +189,7 @@ export interface Project {
   createdBy: string;
   employeeId?: string | null;
   startDate?: string | null;
+  assignedDate?: string | null;
   dueDate?: string | null;
   completedAt?: string | null;
   createdAt: string;
@@ -214,6 +221,7 @@ export interface CreateProjectInput {
   status?: ProjectStatus;
   employeeId?: string | null;
   startDate?: string | null;
+  assignedDate?: string | null;
   dueDate?: string | null;
   members?: { employeeId: string; projectRole?: ProjectRole | string }[];
 }
@@ -224,6 +232,7 @@ export interface UpdateProjectInput {
   status?: ProjectStatus;
   employeeId?: string | null;
   startDate?: string | null;
+  assignedDate?: string | null;
   dueDate?: string | null;
   members?: { employeeId: string; projectRole?: ProjectRole | string }[];
 }
@@ -262,6 +271,7 @@ export interface Task {
   status: TaskStatus;
   priority: TaskPriority;
   startDate?: string | null;
+  assignedDate?: string | null;
   dueDate?: string | null;
   estimatedMinutes?: number | null;
   completedAt?: string | null;
@@ -479,6 +489,8 @@ export interface LiveEmployeeActivity {
     priority: TaskPriority;
     status: TaskStatus;
     timerStartedAt?: string | null;
+    priorClosedDurationSeconds?: number;
+    totalDurationSeconds?: number;
     elapsedSeconds: number;
     isActive: boolean;
     projectName?: string | null;

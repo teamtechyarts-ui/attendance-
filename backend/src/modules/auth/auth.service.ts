@@ -4,9 +4,11 @@ import { SecurityUtil } from '../../utils/security.js';
 import { DateTimeUtil } from '../../utils/datetime.js';
 import { AuditService } from '../../services/audit.service.js';
 import { EmailService } from '../../services/email.service.js';
+import { RbacService } from '../../services/rbac.service.js';
 import { config } from '../../config/env.js';
 import { AuthUser, AccessMode, SessionInfo } from '../../types/index.js';
 import { LoginInput, ChangePasswordInput } from '../../validation/index.js';
+import { invalidateAuthSession, invalidateUserAuthSessions } from '../../middleware/auth.js';
 
 export class AuthService {
   /**
@@ -259,10 +261,15 @@ export class AuthService {
     const accessToken = SecurityUtil.generateAccessToken(tokenPayload);
     const refreshToken = SecurityUtil.generateRefreshToken(tokenPayload);
 
+    const authz = await RbacService.getUserAuthorization(user.id);
+
     const authUser: AuthUser = {
       id: user.id,
       email: user.email,
       role: user.role as any,
+      appRole: authz.appRole,
+      permissions: authz.permissions,
+      scope: authz.scope,
       status: user.status as any,
       employeeId: userEmployee?.id || null,
       employeeCode: userEmployee?.employeeCode || userEmployee?.employee_code || null,
@@ -339,6 +346,9 @@ export class AuthService {
         });
       }
     );
+
+    // Invalidate in-memory session cache immediately
+    invalidateAuthSession(sessionId);
 
     await AuditService.log({
       userId: user.id,
@@ -506,10 +516,15 @@ export class AuthService {
     const newAccessToken = SecurityUtil.generateAccessToken(tokenPayload);
     const newRefreshToken = SecurityUtil.generateRefreshToken(tokenPayload);
 
+    const authz = await RbacService.getUserAuthorization(user.id);
+
     const authUser: AuthUser = {
       id: user.id,
       email: user.email,
       role: user.role as any,
+      appRole: authz.appRole,
+      permissions: authz.permissions,
+      scope: authz.scope,
       status: user.status as any,
       employeeId: userEmployee?.id || null,
       employeeCode: userEmployee?.employeeCode || userEmployee?.employee_code || null,
@@ -556,7 +571,68 @@ export class AuthService {
   /**
    * Get Current Session Details
    */
-  public static async getMe(userId: string, sessionId: string): Promise<SessionInfo> {
+  public static async getMe(
+    userId: string,
+    sessionId: string,
+    preloadedUser?: AuthUser,
+    preloadedAccessMode?: AccessMode
+  ): Promise<SessionInfo> {
+    const todayStr = DateTimeUtil.getTodayDateString();
+    let todayAttendance: any = null;
+
+    if (preloadedUser) {
+      const userEmployeeId = preloadedUser.employeeId || null;
+      if (userEmployeeId) {
+        todayAttendance = await DbService.query(
+          async () => {
+            return await prisma.attendance.findUnique({
+              where: {
+                employeeId_attendanceDate: {
+                  employeeId: userEmployeeId,
+                  attendanceDate: new Date(todayStr),
+                },
+              },
+            });
+          },
+          async () => {
+            const res = await DbService.restRequest<any[]>(
+              `/attendance?employee_id=eq.${userEmployeeId}&attendance_date=eq.${todayStr}`
+            );
+            return res?.[0] || null;
+          }
+        );
+      }
+
+      const isFirstLogin = Boolean(preloadedUser.firstLoginRequired);
+      const accessMode = isFirstLogin ? 'FIRST_LOGIN_REQUIRED' : (preloadedAccessMode || 'NORMAL');
+
+      return {
+        sessionId,
+        userId: preloadedUser.id,
+        accessMode,
+        attendanceRequired: isFirstLogin ? false : accessMode === 'RESTRICTED',
+        restrictedUntil: null,
+        expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString(),
+        user: preloadedUser,
+        firstLoginRequired: isFirstLogin,
+        todayAttendance: todayAttendance
+          ? {
+              id: todayAttendance.id,
+              employeeId: todayAttendance.employeeId || todayAttendance.employee_id,
+              attendanceDate: todayStr,
+              status: todayAttendance.status,
+              workMode: todayAttendance.workMode || todayAttendance.work_mode,
+              verificationMethod: todayAttendance.verificationMethod || todayAttendance.verification_method,
+              checkInAt: todayAttendance.checkInAt || todayAttendance.check_in_at,
+              checkOutAt: todayAttendance.checkOutAt || todayAttendance.check_out_at,
+              totalWorkMinutes: todayAttendance.totalWorkMinutes || todayAttendance.total_work_minutes,
+              createdAt: todayAttendance.createdAt || todayAttendance.created_at,
+              updatedAt: todayAttendance.updatedAt || todayAttendance.updated_at,
+            }
+          : null,
+      };
+    }
+
     const session = await DbService.query(
       async () => {
         return await prisma.userSession.findUnique({
@@ -591,8 +667,6 @@ export class AuthService {
 
     const user = session.user;
     const isFirstLogin = user.passwordChangedAt === null && user.role === 'EMPLOYEE';
-    const todayStr = DateTimeUtil.getTodayDateString();
-    let todayAttendance: any = null;
 
     let userEmployee = user.employee;
     if (Array.isArray(userEmployee)) {
@@ -635,10 +709,15 @@ export class AuthService {
       );
     }
 
+    const authz = await RbacService.getUserAuthorization(user.id);
+
     const authUser: AuthUser = {
       id: user.id,
       email: user.email,
       role: user.role as any,
+      appRole: authz.appRole,
+      permissions: authz.permissions,
+      scope: authz.scope,
       status: user.status as any,
       employeeId: userEmployee?.id || null,
       employeeCode: userEmployee?.employeeCode || userEmployee?.employee_code || null,
@@ -813,6 +892,9 @@ export class AuthService {
         });
       }
     );
+
+    // Invalidate cached sessions on password change
+    invalidateUserAuthSessions(userId);
 
     await AuditService.log({
       userId,

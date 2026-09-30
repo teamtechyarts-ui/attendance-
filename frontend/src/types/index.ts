@@ -3,7 +3,7 @@ export type UserRole = 'SUPER_ADMIN' | 'ADMIN' | 'MANAGER' | 'EMPLOYEE';
 export type UserStatus = 'ACTIVE' | 'INACTIVE' | 'SUSPENDED' | 'PENDING';
 export type GenderType = 'MALE' | 'FEMALE' | 'OTHER' | 'PREFER_NOT_TO_SAY';
 export type EmploymentStatus = 'ACTIVE' | 'ON_NOTICE' | 'RESIGNED' | 'TERMINATED';
-export type AttendanceStatus = 'PRESENT' | 'ABSENT' | 'HALF_DAY' | 'LATE' | 'ON_LEAVE' | 'HOLIDAY' | 'WEEKEND';
+export type AttendanceStatus = 'PRESENT' | 'ABSENT' | 'HALF_DAY' | 'LATE' | 'ON_LEAVE' | 'HOLIDAY' | 'WEEKEND' | 'LEAVE' | 'OFF' | 'UPCOMING';
 export type WorkMode = 'OFFICE' | 'WFH' | 'REMOTE';
 export type AttendanceVerification = 'MANUAL' | 'MOBILE' | 'FACE' | 'FACE_AND_LOCATION';
 export type TaskSource = 'ADMIN' | 'MANAGER' | 'SELF';
@@ -55,6 +55,9 @@ export interface AuthUser {
   departmentName?: string | null;
   designationName?: string | null;
   firstLoginRequired?: boolean;
+  appRole?: AppRole;
+  permissions?: Permission[];
+  scope?: AdminScope | null;
 }
 
 export interface SessionInfo {
@@ -150,15 +153,37 @@ export interface AttendanceRecord {
   checkInAt?: string | null;
   checkOutAt?: string | null;
   totalWorkMinutes?: number | null;
+  isWorkingDay?: boolean;
+  holidayName?: string | null;
+  leaveType?: string | null;
+  leaveReason?: string | null;
   notes?: string | null;
+  isDerived?: boolean;
   checkInLatitude?: number | null;
   checkInLongitude?: number | null;
   checkOutLatitude?: number | null;
   checkOutLongitude?: number | null;
   deviceId?: string | null;
-  createdAt: string;
-  updatedAt: string;
+  createdAt?: string;
+  updatedAt?: string;
   employee?: Partial<Employee> | null;
+}
+
+export interface AttendanceSummary {
+  totalDays: number;
+  workingDays: number;
+  present: number;
+  late: number;
+  halfDay: number;
+  absent: number;
+  leave: number;
+  holidays: number;
+  offDays: number;
+}
+
+export interface AttendanceHistoryResponse {
+  records: AttendanceRecord[];
+  summary: AttendanceSummary;
 }
 
 export type ProjectStatus = 'PLANNING' | 'IN_PROGRESS' | 'COMPLETED' | 'ON_HOLD';
@@ -182,6 +207,7 @@ export interface Project {
   status: ProjectStatus;
   createdBy: string;
   employeeId?: string | null;
+  assignedDate?: string | null;
   startDate?: string | null;
   dueDate?: string | null;
   completedAt?: string | null;
@@ -213,6 +239,7 @@ export interface CreateProjectInput {
   description?: string | null;
   status?: ProjectStatus;
   employeeId?: string | null;
+  assignedDate?: string | null;
   startDate?: string | null;
   dueDate?: string | null;
   members?: { employeeId: string; projectRole?: ProjectRole | string }[];
@@ -223,6 +250,7 @@ export interface UpdateProjectInput {
   description?: string | null;
   status?: ProjectStatus;
   employeeId?: string | null;
+  assignedDate?: string | null;
   startDate?: string | null;
   dueDate?: string | null;
   members?: { employeeId: string; projectRole?: ProjectRole | string }[];
@@ -261,6 +289,7 @@ export interface Task {
   source: TaskSource;
   status: TaskStatus;
   priority: TaskPriority;
+  assignedDate?: string | null;
   startDate?: string | null;
   dueDate?: string | null;
   estimatedMinutes?: number | null;
@@ -303,15 +332,73 @@ export interface LeaveType {
   isActive: boolean;
 }
 
+export interface LeavePolicyConfig {
+  leaveTypeId: string;
+  policyCycle: 'MONTHLY' | 'ANNUAL';
+  monthlyAllocation: number;
+  annualAllocation: number;
+  carryForward: boolean;
+  maxCarryForward: number;
+  requiresApproval: boolean;
+  minNoticeDays: number;
+  isActive: boolean;
+  description?: string | null;
+}
+
+export interface LeaveAllocationRecord {
+  id: string;
+  leaveTypeId: string;
+  year: number;
+  month: number | null;
+  targetType: 'ALL' | 'EMPLOYEE' | 'EMPLOYEES' | 'DEPARTMENT' | 'DESIGNATION';
+  targetEmployeeIds?: string[];
+  targetDepartmentId?: string | null;
+  targetDesignationId?: string | null;
+  allocatedDays: number;
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  createdBy?: string;
+}
+
 export interface EmployeeLeaveBalance {
   id: string;
   employeeId: string;
   leaveTypeId: string;
   year: number;
+  month?: number | null;
   allocatedDays: number;
   usedDays: number;
   pendingDays: number;
+  remainingDays: number;
+  carryForwardDays?: number;
   leaveType?: LeaveType | null;
+  policy?: LeavePolicyConfig | null;
+}
+
+export interface LeaveOrganizationSummary {
+  summary: {
+    totalEmployees: number;
+    totalAllocated: number;
+    totalUsed: number;
+    totalRemaining: number;
+    totalPending: number;
+  };
+  employees: {
+    employee: Partial<Employee>;
+    allocatedDays: number;
+    usedDays: number;
+    pendingDays: number;
+    remainingDays: number;
+    typeBalances: {
+      leaveTypeId: string;
+      leaveTypeName: string;
+      allocatedDays: number;
+      usedDays: number;
+      pendingDays: number;
+      remainingDays: number;
+    }[];
+  }[];
 }
 
 export interface LeaveRequest {
@@ -408,13 +495,24 @@ export interface DigitalIdCard {
 export interface NotificationItem {
   id: string;
   userId: string;
-  type: NotificationType;
+  type: NotificationType | string;
   title: string;
   message: string;
   actionUrl?: string | null;
   isRead: boolean;
   readAt?: string | null;
   createdAt: string;
+}
+
+export interface NotificationListResponse {
+  items: NotificationItem[];
+  meta: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+    unreadCount: number;
+  };
 }
 
 export interface AuditLog {
@@ -479,6 +577,8 @@ export interface LiveEmployeeActivity {
     priority: TaskPriority;
     status: TaskStatus;
     timerStartedAt?: string | null;
+    priorClosedDurationSeconds?: number;
+    totalDurationSeconds?: number;
     elapsedSeconds: number;
     isActive: boolean;
     projectName?: string | null;
@@ -498,4 +598,126 @@ export interface AdminDashboardMetrics {
   pendingLeaveRequestsCount: number;
   reportsSubmittedCount: number;
   reportsMissingCount: number;
+}
+
+// ==========================================
+// ROLE-BASED ACCESS CONTROL (RBAC) SYSTEM
+// ==========================================
+
+export type AppRole = 'SUPER_ADMIN' | 'LIMITED_ADMIN' | 'EMPLOYEE';
+
+export type PermissionCategory = 
+  | 'TASKS' 
+  | 'PROJECTS' 
+  | 'TEAMS' 
+  | 'WORK' 
+  | 'REPORTS' 
+  | 'EMPLOYEES' 
+  | 'ATTENDANCE' 
+  | 'LEAVE' 
+  | 'SETTINGS' 
+  | 'SECURITY';
+
+export type Permission =
+  // Tasks
+  | 'TASK_VIEW'
+  | 'TASK_CREATE'
+  | 'TASK_UPDATE'
+  | 'TASK_EDIT'
+  | 'TASK_ASSIGN'
+  | 'TASK_COMPLETE'
+  | 'TASK_CLOSE'
+  | 'TASK_DELETE'
+  // Projects
+  | 'PROJECT_VIEW'
+  | 'PROJECT_CREATE'
+  | 'PROJECT_UPDATE'
+  | 'PROJECT_EDIT'
+  | 'PROJECT_ASSIGN'
+  | 'PROJECT_DELETE'
+  | 'PROJECT_ARCHIVE'
+  // Teams
+  | 'TEAM_VIEW'
+  | 'TEAM_CREATE'
+  | 'TEAM_UPDATE'
+  | 'TEAM_MEMBER_ADD'
+  | 'TEAM_MEMBER_REMOVE'
+  // Work
+  | 'WORK_VIEW'
+  | 'WORK_MANAGE'
+  | 'WORK_VIEW_DASHBOARD'
+  | 'WORK_VIEW_TIMERS'
+  | 'WORK_EXPORT'
+  // Reports
+  | 'REPORT_VIEW'
+  | 'REPORTS_VIEW'
+  | 'REPORTS_APPROVE'
+  | 'REPORTS_EXPORT'
+  // Employees
+  | 'EMPLOYEE_VIEW'
+  | 'EMPLOYEE_CREATE'
+  | 'EMPLOYEE_UPDATE'
+  | 'EMPLOYEE_EDIT'
+  | 'EMPLOYEE_DEACTIVATE'
+  // Attendance
+  | 'ATTENDANCE_VIEW'
+  | 'ATTENDANCE_MANAGE'
+  | 'ATTENDANCE_EDIT'
+  | 'ATTENDANCE_EXPORT'
+  // Leave
+  | 'LEAVE_VIEW'
+  | 'LEAVE_MANAGE'
+  | 'LEAVE_APPROVE'
+  // Settings
+  | 'SETTINGS_VIEW'
+  | 'SETTINGS_MANAGE'
+  | 'SETTINGS_EDIT'
+  // Security & RBAC
+  | 'ROLE_VIEW'
+  | 'ROLE_ASSIGN'
+  | 'PERMISSION_VIEW'
+  | 'PERMISSION_ASSIGN'
+  | 'AUDIT_VIEW'
+  | 'SECURITY_AUDIT'
+  | 'SECURITY_MANAGE_ROLES';
+
+export interface AdminScope {
+  departments?: string[];
+  projects?: string[];
+  employees?: string[];
+  departmentIds?: string[];
+  projectIds?: string[];
+  employeeIds?: string[];
+}
+
+export interface LimitedAdminConfig {
+  grantedBy: string;
+  grantedAt: string;
+  updatedAt: string;
+  permissions: Permission[];
+  scope?: AdminScope | null;
+  notes?: string | null;
+}
+
+export interface PermissionDefinition {
+  key: Permission;
+  label: string;
+  description: string;
+  category: PermissionCategory;
+  isSensitive?: boolean;
+}
+
+export interface LimitedAdminAssignment {
+  userId: string;
+  employeeId?: string | null;
+  employeeCode?: string | null;
+  displayName: string;
+  email: string;
+  departmentName?: string | null;
+  designationName?: string | null;
+  employmentStatus: string;
+  appRole: AppRole;
+  isSuperAdmin: boolean;
+  isLimitedAdmin: boolean;
+  config: LimitedAdminConfig | null;
 }

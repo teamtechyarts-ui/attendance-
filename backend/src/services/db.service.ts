@@ -3,30 +3,34 @@ import { config } from '../config/env.js';
 
 // Resilient DB service that connects via Prisma or Supabase REST engine
 export class DbService {
-  private static useRestFallback = false;
+  private static useRestFallback = Boolean(
+    !process.env.DATABASE_URL ||
+    process.env.DATABASE_URL.includes(':password@') ||
+    process.env.USE_REST_FALLBACK === 'true'
+  );
 
   public static async query<T>(
     prismaFn: () => Promise<T>,
     restFallbackFn?: () => Promise<T>
   ): Promise<T> {
-    if (!DbService.useRestFallback) {
-      try {
-        return await prismaFn();
-      } catch (err: any) {
-        // If PostgreSQL connection error (e.g. invalid password / host unreachable in local dev)
-        if (restFallbackFn) {
-          console.warn('[DbService] Direct Prisma query failed, activating Supabase REST fallback:', err.message || err);
-          DbService.useRestFallback = true;
-          return await restFallbackFn();
-        }
-        throw err;
-      }
-    }
-
-    if (restFallbackFn) {
+    if (DbService.useRestFallback && restFallbackFn) {
       return await restFallbackFn();
     }
-    return await prismaFn();
+
+    try {
+      return await prismaFn();
+    } catch (err: any) {
+      // If it's a business logic or authorization error, never suppress it with a fallback
+      if (err.statusCode || err.status || err.code === 'FORBIDDEN' || err.code === 'VALIDATION_ERROR') {
+        throw err;
+      }
+      // If PostgreSQL connection error (e.g. invalid password / host unreachable in local dev)
+      if (restFallbackFn) {
+        DbService.useRestFallback = true;
+        return await restFallbackFn();
+      }
+      throw err;
+    }
   }
 
   public static toCamelCase<T = any>(obj: any): T {

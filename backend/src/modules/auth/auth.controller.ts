@@ -101,7 +101,7 @@ export class AuthController {
       });
     }
 
-    const result = await AuthService.getMe(request.user.id, request.sessionId);
+    const result = await AuthService.getMe(request.user.id, request.sessionId, request.user, request.accessMode);
     return reply.send({
       success: true,
       data: result,

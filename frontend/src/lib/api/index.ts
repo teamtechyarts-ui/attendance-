@@ -6,8 +6,14 @@ import {
   Employee,
   Task,
   AttendanceRecord,
+  AttendanceSummary,
+  AttendanceHistoryResponse,
   LeaveRequest,
   LeaveType,
+  LeavePolicyConfig,
+  LeaveAllocationRecord,
+  EmployeeLeaveBalance,
+  LeaveOrganizationSummary,
   DailyWorkReport,
   Feedback,
   CalendarEvent,
@@ -22,6 +28,10 @@ import {
   ProjectMember,
   TaskComment,
   TaskMention,
+  Permission,
+  AdminScope,
+  PermissionDefinition,
+  LimitedAdminAssignment,
 } from '@/types';
 import {
   LoginInput,
@@ -51,6 +61,18 @@ export const authApi = {
 };
 
 export const employeesApi = {
+  listAssignable: (params?: { departmentId?: string; search?: string; projectId?: string }) => {
+    const cleanParams: Record<string, string> = {};
+    if (params) {
+      for (const [k, v] of Object.entries(params)) {
+        if (v !== undefined && v !== null && v !== '' && v !== 'undefined' && v !== 'null') {
+          cleanParams[k] = String(v);
+        }
+      }
+    }
+    const query = new URLSearchParams(cleanParams).toString();
+    return api.get<Employee[]>(`/api/employees/assignable${query ? `?${query}` : ''}`);
+  },
   list: (params?: { departmentId?: string; search?: string; status?: string }) => {
     const cleanParams: Record<string, string> = {};
     if (params) {
@@ -71,6 +93,7 @@ export const employeesApi = {
   reactivate: (id: string) => api.post<{ reactivated: boolean; message: string }>(`/api/employees/${id}/reactivate`),
   resendOnboarding: (id: string) => api.post<{ message: string; emailSent: boolean }>(`/api/employees/${id}/resend-onboarding`),
   getMe: () => api.get<Employee>('/api/employees/me'),
+  getNextCode: () => api.get<{ nextEmployeeCode: string }>('/api/employees/next-code'),
   updateMe: (data: any) => api.put<Employee>('/api/employees/me', data),
   updateSelfProfile: (data: any) => api.put<Employee>('/api/employees/me/profile', data),
 };
@@ -79,7 +102,7 @@ export const attendanceApi = {
   getToday: () => api.get<{ record: AttendanceRecord | null; workday: any; date: string }>('/api/attendance/today'),
   checkIn: (data: CheckInInput) => api.post<AttendanceRecord>('/api/attendance/check-in', data),
   checkOut: (data: CheckOutInput) => api.post<AttendanceRecord>('/api/attendance/check-out', data),
-  getHistory: (params?: { year?: number; month?: number; employeeId?: string }) => {
+  getHistory: async (params?: { year?: number; month?: number; employeeId?: string; date?: string; status?: string; adminView?: boolean }) => {
     const cleanParams: Record<string, string> = {};
     if (params) {
       for (const [k, v] of Object.entries(params)) {
@@ -89,14 +112,22 @@ export const attendanceApi = {
       }
     }
     const query = new URLSearchParams(cleanParams).toString();
-    return api.get<AttendanceRecord[]>(`/api/attendance/history${query ? `?${query}` : ''}`);
+    const res = await api.get<any>(`/api/attendance/history${query ? `?${query}` : ''}`);
+    // Support both { records, summary } and legacy array format
+    if (res && Array.isArray(res.records)) {
+      return res as { records: AttendanceRecord[]; summary: any };
+    }
+    if (Array.isArray(res)) {
+      return { records: res as AttendanceRecord[], summary: null };
+    }
+    return { records: [], summary: null };
   },
   getLiveOverview: () => api.get<LiveEmployeeActivity[]>('/api/attendance/live-overview'),
   getMetrics: () => api.get<AdminDashboardMetrics>('/api/attendance/metrics'),
 };
 
 export const projectsApi = {
-  list: (params?: { search?: string; status?: string; employeeId?: string }) => {
+  list: (params?: { search?: string; status?: string; employeeId?: string; adminView?: boolean }) => {
     const cleanParams: Record<string, string> = {};
     if (params) {
       for (const [k, v] of Object.entries(params)) {
@@ -139,9 +170,14 @@ export const tasksApi = {
   getById: (id: string) => api.get<Task>(`/api/tasks/${id}`),
   create: (data: CreateTaskInput) => api.post<Task>('/api/tasks', data),
   update: (id: string, data: UpdateTaskInput) => api.put<Task>(`/api/tasks/${id}`, data),
+  delete: (id: string) => api.delete<{ deleted: boolean; id: string }>(`/api/tasks/${id}`),
   getComments: (id: string) => api.get<TaskComment[]>(`/api/tasks/${id}/comments`),
-  addComment: (id: string, data: { comment: string; mentionedEmployeeIds?: string[] }) =>
-    api.post<TaskComment>(`/api/tasks/${id}/comments`, data),
+  listComments: (id: string) => api.get<TaskComment[]>(`/api/tasks/${id}/comments`),
+  addComment: (id: string, data: { content?: string; comment?: string; mentionedEmployeeIds?: string[]; mentionEmployeeIds?: string[] }) =>
+    api.post<TaskComment>(`/api/tasks/${id}/comments`, {
+      content: data.content || data.comment || '',
+      mentionEmployeeIds: data.mentionEmployeeIds || data.mentionedEmployeeIds || [],
+    }),
   getMentions: (id: string) => api.get<TaskMention[]>(`/api/tasks/${id}/mentions`),
   addMention: (id: string, data: { mentionedEmployeeId: string; context?: string }) =>
     api.post<TaskMention>(`/api/tasks/${id}/mentions`, data),
@@ -164,11 +200,51 @@ export const tasksApi = {
 };
 
 export const leaveApi = {
-  getTypes: () => api.get<LeaveType[]>('/api/leave/types'),
-  getBalances: (params?: { employeeId?: string; year?: number }) => {
-    const query = new URLSearchParams(params as any).toString();
-    return api.get<any[]>(`/api/leave/balances${query ? `?${query}` : ''}`);
+  getTypes: (all?: boolean) => api.get<LeaveType[]>(`/api/leave/types${all ? '?all=true' : ''}`),
+  createType: (data: { name: string; description?: string; defaultDaysPerYear?: number; isPaid?: boolean }) =>
+    api.post<LeaveType>('/api/leave/types', data),
+  updateType: (id: string, data: Partial<LeaveType>) => api.put<LeaveType>(`/api/leave/types/${id}`, data),
+  deleteType: (id: string) => api.delete<void>(`/api/leave/types/${id}`),
+
+  getPolicies: () => api.get<LeavePolicyConfig[]>('/api/leave/policies'),
+  updatePolicy: (leaveTypeId: string, data: Partial<LeavePolicyConfig>) =>
+    api.put<LeavePolicyConfig>(`/api/leave/policies/${leaveTypeId}`, data),
+
+  getAllocations: (params?: { year?: number; month?: number | null; employeeId?: string; leaveTypeId?: string }) => {
+    const cleanParams: Record<string, string> = {};
+    if (params) {
+      for (const [k, v] of Object.entries(params)) {
+        if (v !== undefined && v !== null && v !== '') cleanParams[k] = String(v);
+      }
+    }
+    const query = new URLSearchParams(cleanParams).toString();
+    return api.get<LeaveAllocationRecord[]>(`/api/leave/allocations${query ? `?${query}` : ''}`);
   },
+  createAllocation: (data: any) => api.post<LeaveAllocationRecord>('/api/leave/allocations', data),
+  updateAllocation: (id: string, data: any) => api.put<LeaveAllocationRecord>(`/api/leave/allocations/${id}`, data),
+  deleteAllocation: (id: string) => api.delete<{ deleted: boolean; id: string }>(`/api/leave/allocations/${id}`),
+
+  getBalances: (params?: { employeeId?: string; year?: number; month?: number | null; adminView?: boolean }) => {
+    const cleanParams: Record<string, string> = {};
+    if (params) {
+      for (const [k, v] of Object.entries(params)) {
+        if (v !== undefined && v !== null && v !== '') cleanParams[k] = String(v);
+      }
+    }
+    const query = new URLSearchParams(cleanParams).toString();
+    return api.get<EmployeeLeaveBalance[]>(`/api/leave/balances${query ? `?${query}` : ''}`);
+  },
+  getOrganizationSummary: (params?: { year?: number; month?: number | null; departmentId?: string }) => {
+    const cleanParams: Record<string, string> = {};
+    if (params) {
+      for (const [k, v] of Object.entries(params)) {
+        if (v !== undefined && v !== null && v !== '') cleanParams[k] = String(v);
+      }
+    }
+    const query = new URLSearchParams(cleanParams).toString();
+    return api.get<LeaveOrganizationSummary>(`/api/leave/organization-summary${query ? `?${query}` : ''}`);
+  },
+
   listRequests: (params?: Record<string, any>) => {
     const cleanParams: Record<string, string> = {};
     if (params) {
@@ -241,9 +317,18 @@ export const digitalIdApi = {
 };
 
 export const notificationsApi = {
-  list: () => api.get<NotificationItem[]>('/api/notifications'),
+  list: (params?: { page?: number; limit?: number; unreadOnly?: boolean }) => {
+    const searchParams = new URLSearchParams();
+    if (params?.page) searchParams.set('page', String(params.page));
+    if (params?.limit) searchParams.set('limit', String(params.limit));
+    if (params?.unreadOnly) searchParams.set('unreadOnly', 'true');
+    const qs = searchParams.toString();
+    return api.get<NotificationItem[]>(`/api/notifications${qs ? `?${qs}` : ''}`);
+  },
+  getUnreadCount: () => api.get<{ unreadCount: number }>('/api/notifications/unread-count'),
   markRead: (id: string) => api.patch<NotificationItem>(`/api/notifications/${id}/read`),
-  markAllRead: () => api.post('/api/notifications/read-all'),
+  markAllRead: () => api.post<{ message: string; count: number }>('/api/notifications/read-all'),
+  delete: (id: string) => api.delete<{ message: string }>(`/api/notifications/${id}`),
 };
 
 export const metadataApi = {
@@ -271,3 +356,32 @@ export const metadataApi = {
   deleteWorkSchedule: (id: string) =>
     api.delete<{ message: string; data?: WorkSchedule }>(`/api/work-schedules/${id}`),
 };
+
+export const departmentsApi = {
+  list: (params?: { includeInactive?: boolean }) => metadataApi.getDepartments(params),
+  create: (data: { name: string; description?: string | null; isActive?: boolean }) => metadataApi.createDepartment(data),
+  update: (id: string, data: { name?: string; description?: string | null; isActive?: boolean }) => metadataApi.updateDepartment(id, data),
+  delete: (id: string) => metadataApi.deleteDepartment(id),
+};
+
+export const designationsApi = {
+  list: (params?: { includeInactive?: boolean }) => metadataApi.getDesignations(params),
+  create: (data: { name: string; description?: string | null; isActive?: boolean }) => metadataApi.createDesignation(data),
+  update: (id: string, data: { name?: string; description?: string | null; isActive?: boolean }) => metadataApi.updateDesignation(id, data),
+  delete: (id: string) => metadataApi.deleteDesignation(id),
+};
+
+
+export const rbacApi = {
+  getPermissions: () => api.get<PermissionDefinition[]>('/api/rbac/permissions'),
+  getAssignments: () => api.get<LimitedAdminAssignment[]>('/api/rbac/assignments'),
+  getAssignment: (employeeId: string) => api.get<LimitedAdminAssignment>(`/api/rbac/assignments/${employeeId}`),
+  grantAssignment: (
+    employeeId: string,
+    data: { permissions: Permission[]; scope?: AdminScope | null; notes?: string | null }
+  ) => api.post<LimitedAdminAssignment>(`/api/rbac/assignments/${employeeId}`, data),
+  revokeAssignment: (employeeId: string) =>
+    api.delete<{ message: string }>(`/api/rbac/assignments/${employeeId}`),
+};
+
+

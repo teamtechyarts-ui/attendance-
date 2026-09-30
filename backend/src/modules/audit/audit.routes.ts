@@ -2,11 +2,11 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { prisma } from '../../plugins/prisma.js';
 import { DbService } from '../../services/db.service.js';
 import { authenticate } from '../../middleware/auth.js';
-import { requireAdmin } from '../../middleware/permissions.js';
+import { requirePermission } from '../../middleware/permissions.js';
 
 export async function auditRoutes(fastify: FastifyInstance) {
   fastify.addHook('preHandler', authenticate);
-  fastify.addHook('preHandler', requireAdmin());
+  fastify.addHook('preHandler', requirePermission('SECURITY_AUDIT'));
 
   // List audit logs
   fastify.get('/', async (request: FastifyRequest, reply: FastifyReply) => {

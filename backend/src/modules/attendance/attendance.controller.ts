@@ -1,6 +1,10 @@
 import { FastifyReply, FastifyRequest } from 'fastify';
 import { AttendanceService } from './attendance.service.js';
-import { checkInSchema, checkOutSchema } from '../../validation/index.js';
+import { RbacService } from '../../services/rbac.service.js';
+import { DbService } from '../../services/db.service.js';
+import { prisma } from '../../plugins/prisma.js';
+import { checkInSchema, checkOutSchema, attendanceHistoryQuerySchema } from '../../validation/index.js';
+
 
 export class AttendanceController {
   public static async getToday(request: FastifyRequest, reply: FastifyReply) {
@@ -86,7 +90,6 @@ export class AttendanceController {
   }
 
   public static async getHistory(request: FastifyRequest, reply: FastifyReply) {
-    const query = request.query as any;
     const user = request.user;
     if (!user) {
       return reply.status(401).send({
@@ -95,26 +98,92 @@ export class AttendanceController {
       });
     }
 
-    // RBAC: An employee can ONLY view their own attendance history
-    let empId: string | null = null;
-    if (user.role === 'EMPLOYEE') {
-      empId = user.employeeId || null;
+    const query = attendanceHistoryQuerySchema.parse(request.query);
+    const rawQuery = request.query as any;
+    const isSuper = user.role === 'SUPER_ADMIN' || user.appRole === 'SUPER_ADMIN';
+    const isAdminView = rawQuery?.adminView === 'true' || rawQuery?.adminView === true;
+
+    let empId: string | string[] | null = null;
+
+    if (isAdminView) {
+      // Administrative Context (/admin-view/attendance or /admin/attendance)
+      const canViewAllAttendance =
+        isSuper ||
+        RbacService.hasPermission(user, 'ATTENDANCE_VIEW') ||
+        RbacService.hasPermission(user, 'ATTENDANCE_MANAGE') ||
+        RbacService.hasPermission(user, 'ATTENDANCE_EDIT');
+
+      if (!canViewAllAttendance) {
+        return reply.status(403).send({
+          success: false,
+          error: { code: 'FORBIDDEN', message: 'You do not have administrative permission to view team attendance' },
+        });
+      }
+
+      if (query.employeeId && query.employeeId !== 'undefined' && query.employeeId !== 'null' && query.employeeId.trim() !== '') {
+        if (!isSuper) {
+          const hasScope = await RbacService.hasScopeAccess(user, { employeeId: query.employeeId });
+          if (!hasScope) {
+            return reply.status(403).send({
+              success: false,
+              error: { code: 'FORBIDDEN', message: 'Target employee is outside your permitted administrative scope' },
+            });
+          }
+        }
+        empId = query.employeeId;
+      } else if (!isSuper && user.scope?.employees && Array.isArray(user.scope.employees) && user.scope.employees.length > 0) {
+        empId = user.scope.employees;
+      } else {
+        empId = null; // Organization-wide attendance
+      }
     } else {
-      empId = query.employeeId || user.employeeId || null;
+      // Personal Employee Context (Employee View: /attendance)
+      empId = user.employeeId || null;
+      if (!empId && user.id) {
+        try {
+          const emp = await DbService.query(
+            () => prisma.employee.findFirst({ where: { userId: user.id } }),
+            async () => {
+              const emps = await DbService.restRequest<any[]>(`/employees?user_id=eq.${user.id}`);
+              return emps?.[0] || null;
+            }
+          );
+          if (emp) {
+            empId = emp.id;
+          }
+        } catch {}
+      }
+
+      if (!empId) {
+        return reply.send({
+          success: true,
+          data: {
+            records: [],
+            summary: {
+              totalDays: 0,
+              workingDays: 0,
+              present: 0,
+              late: 0,
+              halfDay: 0,
+              absent: 0,
+              leave: 0,
+              holidays: 0,
+              offDays: 0,
+            },
+          },
+        });
+      }
     }
 
-    if (!empId) {
-      return reply.status(400).send({
-        success: false,
-        error: { code: 'EMPLOYEE_ID_REQUIRED', message: 'Employee ID required' },
-      });
-    }
 
-    const data = await AttendanceService.getHistory(
-      empId,
-      query.year ? parseInt(query.year, 10) : undefined,
-      query.month ? parseInt(query.month, 10) : undefined
-    );
+    const data = await AttendanceService.getHistory({
+      employeeId: empId,
+      date: query.date || undefined,
+      year: query.year || undefined,
+      month: query.month || undefined,
+      status: query.status || undefined,
+      adminView: isAdminView,
+    });
 
     return reply.send({
       success: true,

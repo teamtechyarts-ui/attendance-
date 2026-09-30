@@ -13,7 +13,7 @@
     "prisma:generate": "prisma generate --schema=./prisma/schema.prisma",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/auth-and-attendance.test.ts tests/email.test.ts tests/forgot-password-flow.test.ts tests/attendance-timer-checkout.test.ts tests/master-data-crud.test.ts"
+    "test": "tsx --test tests/auth-and-attendance.test.ts tests/email.test.ts tests/forgot-password-flow.test.ts tests/attendance-timer-checkout.test.ts tests/master-data-crud.test.ts tests/attendance-filters.test.ts tests/notifications.test.ts tests/sse-stream-cors.test.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^9.3.1",

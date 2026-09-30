@@ -15,7 +15,7 @@ import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@
 import { Dialog } from '@/components/ui/dialog';
 import { LoadingState } from '@/components/ui/loading-state';
 import { EmptyState } from '@/components/ui/empty-state';
-import { formatDate, formatSecondsToTime } from '@/lib/utils';
+import { formatDate, formatTime, formatSecondsToTime } from '@/lib/utils';
 import {
   Briefcase,
   Plus,
@@ -44,6 +44,17 @@ const PROJECT_ROLES: { value: ProjectRole; label: string }[] = [
   { value: 'OTHER', label: 'Other' },
 ];
 
+const PERIOD_OPTIONS = [
+  { value: 'ALL_TIME', label: 'All Time' },
+  { value: 'TODAY', label: 'Today' },
+  { value: 'YESTERDAY', label: 'Yesterday' },
+  { value: 'THIS_WEEK', label: 'This Week' },
+  { value: 'LAST_WEEK', label: 'Last Week' },
+  { value: 'THIS_MONTH', label: 'This Month' },
+  { value: 'LAST_MONTH', label: 'Last Month' },
+  { value: 'CUSTOM', label: 'Custom Range' },
+];
+
 export default function AdminWorksPage() {
   const [activeTab, setActiveTab] = useState('TASKS');
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -52,7 +63,26 @@ export default function AdminWorksPage() {
   const [summary, setSummary] = useState<any>(null);
   const [search, setSearch] = useState('');
   const [selectedEmp, setSelectedEmp] = useState('');
+  const [period, setPeriod] = useState<string>('ALL_TIME');
+  const [customFrom, setCustomFrom] = useState<string>('');
+  const [customTo, setCustomTo] = useState<string>('');
+  const [appliedCustomFrom, setAppliedCustomFrom] = useState<string>('');
+  const [appliedCustomTo, setAppliedCustomTo] = useState<string>('');
+  const [currentTimeMs, setCurrentTimeMs] = useState<number>(Date.now());
   const [isLoading, setIsLoading] = useState(true);
+
+  // Sorting state (Default: Created Date DESC)
+  const [sortBy, setSortBy] = useState<string>('createdAt');
+  const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
+
+  const handleSort = (field: string) => {
+    if (sortBy === field) {
+      setSortOrder((prev) => (prev === 'desc' ? 'asc' : 'desc'));
+    } else {
+      setSortBy(field);
+      setSortOrder('desc');
+    }
+  };
 
   // Modals
   const [isAssignOpen, setIsAssignOpen] = useState(false);
@@ -71,6 +101,7 @@ export default function AdminWorksPage() {
   const [targetEmpId, setTargetEmpId] = useState('');
   const [taskProjId, setTaskProjId] = useState('');
   const [taskPriority, setTaskPriority] = useState<TaskPriority>('MEDIUM');
+  const [taskAssignedDate, setTaskAssignedDate] = useState(() => new Date().toISOString().split('T')[0]);
   const [taskDueDate, setTaskDueDate] = useState('');
   const [taskEstMinutes, setTaskEstMinutes] = useState('');
   const [isSubmittingTask, setIsSubmittingTask] = useState(false);
@@ -80,44 +111,92 @@ export default function AdminWorksPage() {
   const [projectDesc, setProjectDesc] = useState('');
   const [projectLeadId, setProjectLeadId] = useState('');
   const [projectStatus, setProjectStatus] = useState<ProjectStatus>('IN_PROGRESS');
+  const [projectAssignedDate, setProjectAssignedDate] = useState(() => new Date().toISOString().split('T')[0]);
   const [projectDueDate, setProjectDueDate] = useState('');
   const [selectedTeamMemberIds, setSelectedTeamMemberIds] = useState<{ employeeId: string; projectRole: ProjectRole }[]>([]);
   const [isSubmittingProject, setIsSubmittingProject] = useState(false);
 
+  // 1-second continuous tick for live running timers
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setCurrentTimeMs(Date.now());
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
   const loadData = useCallback(async () => {
     try {
-      const empParam = selectedEmp && selectedEmp !== 'undefined' ? { employeeId: selectedEmp } : undefined;
-      const [taskList, emps, sumData, projList] = await Promise.all([
-        tasksApi.list({
-          search: search || undefined,
-          ...(selectedEmp ? { employeeId: selectedEmp } : {}),
-        }),
-        employeesApi.list(),
-        tasksApi.getSummary(empParam),
-        projectsApi.list({
-          search: search || undefined,
-          ...(selectedEmp ? { employeeId: selectedEmp } : {}),
-        }),
-      ]);
+      const sumParams: Record<string, any> = {};
+      if (selectedEmp && selectedEmp !== 'undefined' && selectedEmp !== 'null' && selectedEmp.trim() !== '') {
+        sumParams.employeeId = selectedEmp;
+      }
+      if (period && period !== 'ALL_TIME') {
+        sumParams.period = period;
+        if (period === 'CUSTOM' && appliedCustomFrom && appliedCustomTo) {
+          sumParams.startDate = appliedCustomFrom;
+          sumParams.endDate = appliedCustomTo;
+        }
+      }
+
+      const tasksPromise = tasksApi.list({
+        adminView: true,
+        search: search || undefined,
+        ...(selectedEmp ? { employeeId: selectedEmp } : {}),
+        sortBy,
+        sortOrder,
+      }).catch((e) => {
+        console.error('[AdminWorksPage] tasksApi.list failed:', e);
+        return [];
+      });
+
+      const empsPromise = employeesApi.listAssignable().catch(() => employeesApi.list());
+      const sumPromise = tasksApi.getSummary(sumParams).catch(() => null);
+      const projPromise = projectsApi.list({
+        adminView: true,
+        search: search || undefined,
+        ...(selectedEmp ? { employeeId: selectedEmp } : {}),
+      }).catch(() => []);
+
+      const taskList = await tasksPromise;
       setTasks(taskList || []);
-      setEmployees(emps || []);
-      setSummary(sumData || null);
-      setProjects(projList || []);
-      if (emps && emps.length > 0 && !targetEmpId) setTargetEmpId(emps[0].id);
+      setIsLoading(false);
+
+      const [emps, sumData, projList] = await Promise.all([empsPromise, sumPromise, projPromise]);
+      const validEmps = (emps || []).filter(
+        (e: any) => e.employmentStatus === 'ACTIVE' && e.user?.role !== 'SUPER_ADMIN'
+      );
+      setEmployees(validEmps);
+      if (sumData) setSummary(sumData);
+      if (projList) setProjects(projList);
+      if (validEmps.length > 0) {
+        setTargetEmpId((prev) => prev || validEmps[0].id);
+      }
     } catch (err) {
       console.error('[AdminWorksPage] Failed to load data:', err);
-    } finally {
       setIsLoading(false);
     }
-  }, [search, selectedEmp, targetEmpId]);
+  }, [search, selectedEmp, period, appliedCustomFrom, appliedCustomTo, sortBy, sortOrder]);
 
   useEffect(() => {
     loadData();
   }, [loadData]);
 
+  // Periodic polling every 30s to keep backend sync
+  useEffect(() => {
+    const pollInterval = setInterval(() => {
+      loadData();
+    }, 30000);
+    return () => clearInterval(pollInterval);
+  }, [loadData]);
+
   const handleAssignTask = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!taskTitle.trim() || !targetEmpId) return;
+
+    if (taskAssignedDate && taskDueDate && new Date(taskDueDate) < new Date(taskAssignedDate)) {
+      alert('Due date must be on or after assigned date');
+      return;
+    }
 
     setIsSubmittingTask(true);
     try {
@@ -127,6 +206,8 @@ export default function AdminWorksPage() {
           description: taskDesc || null,
           employeeId: targetEmpId,
           priority: taskPriority,
+          assignedDate: taskAssignedDate || null,
+          startDate: taskAssignedDate || null,
           dueDate: taskDueDate || null,
           estimatedMinutes: taskEstMinutes ? parseInt(taskEstMinutes, 10) : null,
         });
@@ -136,6 +217,8 @@ export default function AdminWorksPage() {
           description: taskDesc || null,
           employeeId: targetEmpId,
           priority: taskPriority,
+          assignedDate: taskAssignedDate || null,
+          startDate: taskAssignedDate || null,
           dueDate: taskDueDate || null,
           estimatedMinutes: taskEstMinutes ? parseInt(taskEstMinutes, 10) : null,
         });
@@ -144,6 +227,8 @@ export default function AdminWorksPage() {
       setTaskTitle('');
       setTaskDesc('');
       setTaskProjId('');
+      setTaskDueDate('');
+      setTaskAssignedDate(new Date().toISOString().split('T')[0]);
       loadData();
     } catch (err: any) {
       alert(err.message || 'Failed to assign task');
@@ -155,6 +240,11 @@ export default function AdminWorksPage() {
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!projectName.trim()) return;
+
+    if (projectAssignedDate && projectDueDate && new Date(projectDueDate) < new Date(projectAssignedDate)) {
+      alert('Due date must be on or after assigned date');
+      return;
+    }
 
     setIsSubmittingProject(true);
     try {
@@ -168,6 +258,8 @@ export default function AdminWorksPage() {
         description: projectDesc || null,
         employeeId: projectLeadId || null,
         status: projectStatus,
+        assignedDate: projectAssignedDate || null,
+        startDate: projectAssignedDate || null,
         dueDate: projectDueDate || null,
         members,
       });
@@ -175,6 +267,8 @@ export default function AdminWorksPage() {
       setProjectName('');
       setProjectDesc('');
       setProjectLeadId('');
+      setProjectDueDate('');
+      setProjectAssignedDate(new Date().toISOString().split('T')[0]);
       setSelectedTeamMemberIds([]);
       loadData();
     } catch (err: any) {
@@ -231,9 +325,48 @@ export default function AdminWorksPage() {
     }
   };
 
+  // Helper: Live elapsed duration calculation for active tasks
+  const calculateLiveTaskDuration = (task: any, nowMs: number): number => {
+    const timers = task.timers || [];
+    if (!timers || timers.length === 0) return task.totalDurationSeconds || 0;
+    const activeT = timers.find((t: any) => t.isActive ?? t.is_active);
+    if (!activeT) return task.totalDurationSeconds || 0;
+
+    const priorClosed = timers
+      .filter((t: any) => !(t.isActive ?? t.is_active))
+      .reduce((acc: number, t: any) => acc + (t.durationSeconds ?? t.duration_seconds ?? 0), 0);
+    const startedMs = new Date(activeT.startedAt || activeT.started_at).getTime();
+    const runningSec = Math.max(0, Math.floor((nowMs - startedMs) / 1000));
+    return priorClosed + runningSec;
+  };
+
+  const getWorkedTimeTitle = (p: string) => {
+    switch (p) {
+      case 'TODAY':
+        return 'Worked Today';
+      case 'YESTERDAY':
+        return 'Worked Yesterday';
+      case 'THIS_WEEK':
+        return 'Worked This Week';
+      case 'LAST_WEEK':
+        return 'Worked Last Week';
+      case 'THIS_MONTH':
+        return 'Worked This Month';
+      case 'LAST_MONTH':
+        return 'Worked Last Month';
+      case 'CUSTOM':
+        return 'Worked in Range';
+      default:
+        return 'Total Worked Time';
+    }
+  };
+
   // Filter only ACTIVE employees for new work assignment / project creation
   const activeEmployees = employees.filter(
-    (e) => e.employmentStatus === 'ACTIVE' && (e as any).user?.status !== 'INACTIVE'
+    (e) =>
+      e.employmentStatus === 'ACTIVE' &&
+      (e as any).user?.status !== 'INACTIVE' &&
+      (e as any).user?.role !== 'SUPER_ADMIN'
   );
 
   // If a project is selected in Assign Task modal, limit assignee options to that project's active members
@@ -244,7 +377,8 @@ export default function AdminWorksPage() {
           .filter(
             (m) =>
               m.employee?.employmentStatus === 'ACTIVE' &&
-              (m.employee as any)?.user?.status !== 'INACTIVE'
+              (m.employee as any)?.user?.status !== 'INACTIVE' &&
+              (m.employee as any)?.user?.role !== 'SUPER_ADMIN'
           )
           .map((m) => ({
             value: m.employeeId,
@@ -307,13 +441,20 @@ export default function AdminWorksPage() {
 
           <Card className="p-4 bg-white border-neutral-200">
             <div className="flex items-center justify-between">
-              <span className="text-xs text-neutral-500 font-medium">Total Worked Time</span>
+              <span className="text-xs text-neutral-500 font-medium">{getWorkedTimeTitle(period)}</span>
               <Clock className="w-4 h-4 text-blue-500" />
             </div>
             <div className="text-xl font-extrabold text-neutral-900 mt-1 font-mono">
               {formatSecondsToTime(summary.totalWorkedSeconds ?? 0)}
             </div>
-            <div className="text-[11px] text-neutral-400 mt-0.5">({summary.totalWorkedHours ?? 0} hrs logged)</div>
+            <div className="text-[11px] text-neutral-400 mt-0.5">
+              ({summary.totalWorkedHours ?? 0} hrs logged)
+              {period !== 'ALL_TIME' && summary.allTimeWorkedHours !== undefined && (
+                <span className="block text-[10px] text-neutral-500 mt-0.5 font-medium">
+                  Lifetime: {summary.allTimeWorkedHours} hrs
+                </span>
+              )}
+            </div>
           </Card>
 
           <Card className="p-4 bg-white border-neutral-200">
@@ -327,39 +468,112 @@ export default function AdminWorksPage() {
         </div>
       )}
 
-      {/* Tabs & Search Filter */}
-      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
-        <Tabs value={activeTab} onValueChange={setActiveTab} tabs={tabs} />
-        <div className="flex items-center gap-2">
-          <div className="relative w-full sm:w-60">
-            <Search className="w-4 h-4 absolute left-3 top-2.5 text-neutral-400" />
-            <Input
-              placeholder="Search work..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="pl-9 h-9 text-xs"
-            />
-          </div>
-          <div className="w-full sm:w-44">
-            <Select
-              value={selectedEmp}
-              onChange={(e) => setSelectedEmp(e.target.value)}
-              options={[
-                { value: '', label: 'All Employees' },
-                ...employees.map((e) => ({ value: e.id, label: e.displayName })),
-              ]}
-            />
+      {/* Tabs & Period / Employee / Search Filter Bar */}
+      <div className="space-y-3">
+        <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3">
+          <Tabs value={activeTab} onValueChange={setActiveTab} tabs={tabs} />
+          
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative w-full sm:w-48">
+              <Search className="w-4 h-4 absolute left-3 top-2.5 text-neutral-400" />
+              <Input
+                placeholder="Search work..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="pl-9 h-9 text-xs"
+              />
+            </div>
+            <div className="w-full sm:w-40">
+              <Select
+                value={period}
+                onChange={(e) => {
+                  setPeriod(e.target.value);
+                  if (e.target.value !== 'CUSTOM') {
+                    setCustomFrom('');
+                    setCustomTo('');
+                    setAppliedCustomFrom('');
+                    setAppliedCustomTo('');
+                  }
+                }}
+                options={PERIOD_OPTIONS}
+              />
+            </div>
+            <div className="w-full sm:w-44">
+              <Select
+                value={selectedEmp}
+                onChange={(e) => setSelectedEmp(e.target.value)}
+                options={[
+                  { value: '', label: 'All Employees' },
+                  ...employees.map((e) => ({ value: e.id, label: e.displayName })),
+                ]}
+              />
+            </div>
           </div>
         </div>
+
+        {/* Custom Date Range Picker when CUSTOM is selected */}
+        {period === 'CUSTOM' && (
+          <div className="flex flex-wrap items-center gap-2 p-3 bg-white rounded-lg border border-neutral-200 shadow-sm text-xs animate-in fade-in">
+            <span className="font-bold text-neutral-700">Custom Period:</span>
+            <div className="flex items-center gap-1.5">
+              <span className="text-neutral-500 font-medium">From:</span>
+              <Input
+                type="date"
+                value={customFrom}
+                onChange={(e) => setCustomFrom(e.target.value)}
+                className="h-8 text-xs w-36"
+              />
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-neutral-500 font-medium">To:</span>
+              <Input
+                type="date"
+                value={customTo}
+                onChange={(e) => setCustomTo(e.target.value)}
+                className="h-8 text-xs w-36"
+              />
+            </div>
+            <Button
+              size="sm"
+              onClick={() => {
+                if (customFrom && customTo) {
+                  setAppliedCustomFrom(customFrom);
+                  setAppliedCustomTo(customTo);
+                }
+              }}
+              disabled={!customFrom || !customTo}
+              className="h-8 text-xs px-3 font-semibold"
+            >
+              Apply
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setCustomFrom('');
+                setCustomTo('');
+                setAppliedCustomFrom('');
+                setAppliedCustomTo('');
+                setPeriod('ALL_TIME');
+              }}
+              className="h-8 text-xs px-2.5"
+            >
+              Clear
+            </Button>
+          </div>
+        )}
       </div>
 
-      {/* Loading state */}
-      {isLoading ? (
-        <LoadingState message="Loading work items..." />
-      ) : activeTab === 'TASKS' ? (
+      {activeTab === 'TASKS' ? (
         /* TAB 1: Tasks Table */
         <Card className="p-0 border-neutral-200 overflow-hidden">
-          {tasks.length === 0 ? (
+          {isLoading && tasks.length === 0 ? (
+            <div className="space-y-3 p-5 animate-pulse">
+              <div className="h-8 bg-neutral-100 rounded w-full"></div>
+              <div className="h-8 bg-neutral-100 rounded w-full"></div>
+              <div className="h-8 bg-neutral-100 rounded w-full"></div>
+            </div>
+          ) : tasks.length === 0 ? (
             <div className="p-8">
               <EmptyState
                 title="No Tasks Found"
@@ -372,8 +586,28 @@ export default function AdminWorksPage() {
             <Table>
               <TableHeader>
                 <TableRow className="bg-neutral-50/50">
-                  <TableHead className="font-bold text-xs uppercase text-neutral-500">Task Title & Project</TableHead>
+                  <TableHead className="font-bold text-xs uppercase text-neutral-500">Task</TableHead>
                   <TableHead className="font-bold text-xs uppercase text-neutral-500">Assignee</TableHead>
+                  <TableHead
+                    onClick={() => handleSort('createdAt')}
+                    className="font-bold text-xs uppercase text-neutral-700 hover:text-black cursor-pointer select-none transition-colors"
+                    title="Click to toggle sorting by Created Date (Newest / Oldest)"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span>Created</span>
+                      {sortBy === 'createdAt' ? (
+                        sortOrder === 'desc' ? (
+                          <span className="inline-flex items-center text-black font-extrabold text-xs" title="Newest first">↓</span>
+                        ) : (
+                          <span className="inline-flex items-center text-black font-extrabold text-xs" title="Oldest first">↑</span>
+                        )
+                      ) : (
+                        <span className="text-neutral-400 text-xs opacity-60">↕</span>
+                      )}
+                    </div>
+                  </TableHead>
+                  <TableHead className="font-bold text-xs uppercase text-neutral-500">Assigned</TableHead>
+                  <TableHead className="font-bold text-xs uppercase text-neutral-500">Due</TableHead>
                   <TableHead className="font-bold text-xs uppercase text-neutral-500">Priority</TableHead>
                   <TableHead className="font-bold text-xs uppercase text-neutral-500">Status</TableHead>
                   <TableHead className="font-bold text-xs uppercase text-neutral-500">Time Tracked</TableHead>
@@ -382,7 +616,10 @@ export default function AdminWorksPage() {
               </TableHeader>
               <TableBody>
                 {tasks.map((task: any) => {
-                  const isRunning = task.activeTimer || (task.timers && task.timers.some((t: any) => t.isActive));
+                  const isRunning = Boolean(task.activeTimer || (task.timers && task.timers.some((t: any) => t.isActive ?? t.is_active)));
+                  const isPaused = !isRunning && (task.status === 'PAUSED' || (task.totalDurationSeconds && task.totalDurationSeconds > 0 && task.status !== 'COMPLETED'));
+                  const liveDuration = isRunning ? calculateLiveTaskDuration(task, currentTimeMs) : (task.totalDurationSeconds || 0);
+
                   return (
                     <TableRow key={task.id} className="hover:bg-neutral-50/80 transition-colors">
                       <TableCell>
@@ -400,9 +637,6 @@ export default function AdminWorksPage() {
                         {task.description && (
                           <div className="text-xs text-neutral-500 truncate max-w-md mt-0.5">{task.description}</div>
                         )}
-                        {task.dueDate && (
-                          <div className="text-[11px] text-neutral-400 mt-1">Due: {formatDate(task.dueDate)}</div>
-                        )}
                       </TableCell>
                       <TableCell>
                         <div className="flex items-center gap-2">
@@ -415,6 +649,18 @@ export default function AdminWorksPage() {
                             </div>
                           </div>
                         </div>
+                      </TableCell>
+                      <TableCell className="text-xs text-neutral-700 whitespace-nowrap">
+                        <div className="font-medium text-neutral-900">{formatDate(task.createdAt)}</div>
+                        <div className="text-[10px] text-neutral-400 font-mono">
+                          {formatTime(task.createdAt)}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-xs text-neutral-700 whitespace-nowrap">
+                        {task.assignedDate || task.startDate ? formatDate(task.assignedDate || task.startDate) : '—'}
+                      </TableCell>
+                      <TableCell className="text-xs text-neutral-700 whitespace-nowrap">
+                        {task.dueDate ? formatDate(task.dueDate) : 'No due date'}
                       </TableCell>
                       <TableCell>
                         <Badge
@@ -438,6 +684,8 @@ export default function AdminWorksPage() {
                                 ? 'success'
                                 : task.status === 'IN_PROGRESS'
                                 ? 'default'
+                                : task.status === 'PAUSED'
+                                ? 'warning'
                                 : 'secondary'
                             }
                           >
@@ -446,9 +694,26 @@ export default function AdminWorksPage() {
                         </div>
                       </TableCell>
                       <TableCell>
-                        <div className="font-mono font-bold text-xs text-neutral-900">
-                          {formatSecondsToTime(task.totalDurationSeconds || 0)}
-                        </div>
+                        {isRunning ? (
+                          <div className="flex items-center gap-1.5 font-mono font-bold text-xs text-emerald-600">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                            <span>{formatSecondsToTime(liveDuration)}</span>
+                            <span className="text-[10px] font-sans font-bold tracking-wider text-emerald-600 bg-emerald-50 px-1 py-0.5 rounded border border-emerald-200">
+                              LIVE
+                            </span>
+                          </div>
+                        ) : isPaused ? (
+                          <div className="flex items-center gap-1.5 font-mono font-bold text-xs text-neutral-900">
+                            <span>{formatSecondsToTime(liveDuration)}</span>
+                            <span className="text-[10px] font-sans font-bold tracking-wider text-amber-700 bg-amber-50 px-1 py-0.5 rounded border border-amber-200">
+                              PAUSED
+                            </span>
+                          </div>
+                        ) : (
+                          <div className="font-mono font-bold text-xs text-neutral-900">
+                            {formatSecondsToTime(liveDuration)}
+                          </div>
+                        )}
                       </TableCell>
                       <TableCell className="text-right">
                         <Button
@@ -532,9 +797,10 @@ export default function AdminWorksPage() {
                   </div>
 
                   <div className="mt-5 pt-3 border-t border-neutral-100 flex items-center justify-between">
-                    <span className="text-[11px] text-neutral-400">
-                      {proj.dueDate ? `Due: ${formatDate(proj.dueDate)}` : 'No due date'}
-                    </span>
+                    <div className="flex flex-col gap-0.5 text-[11px] text-neutral-500">
+                      <span>Assigned: {proj.assignedDate || proj.startDate ? formatDate(proj.assignedDate || proj.startDate) : '—'}</span>
+                      <span>Due: {proj.dueDate ? formatDate(proj.dueDate) : 'No due date'}</span>
+                    </div>
                     <Link href={`/admin/projects/${proj.id}`}>
                       <Button size="sm" variant="outline" className="h-7 text-xs gap-1">
                         Workspace <ArrowRight className="w-3 h-3" />
@@ -636,20 +902,30 @@ export default function AdminWorksPage() {
               ]}
             />
             <Input
-              label="Due Date"
-              type="date"
-              value={taskDueDate}
-              onChange={(e) => setTaskDueDate(e.target.value)}
+              label="Estimated Time (Minutes)"
+              type="number"
+              placeholder="e.g. 90"
+              value={taskEstMinutes}
+              onChange={(e) => setTaskEstMinutes(e.target.value)}
             />
           </div>
 
-          <Input
-            label="Estimated Time (Minutes)"
-            type="number"
-            placeholder="e.g. 90"
-            value={taskEstMinutes}
-            onChange={(e) => setTaskEstMinutes(e.target.value)}
-          />
+          <div className="grid grid-cols-2 gap-3">
+            <Input
+              label="Assigned Date *"
+              type="date"
+              value={taskAssignedDate}
+              onChange={(e) => setTaskAssignedDate(e.target.value)}
+              required
+            />
+            <Input
+              label="Due Date"
+              type="date"
+              value={taskDueDate}
+              min={taskAssignedDate || undefined}
+              onChange={(e) => setTaskDueDate(e.target.value)}
+            />
+          </div>
 
           <Textarea
             label="Task Description"
@@ -695,7 +971,7 @@ export default function AdminWorksPage() {
             ]}
           />
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-3 gap-3">
             <Select
               label="Project Status"
               value={projectStatus}
@@ -708,9 +984,17 @@ export default function AdminWorksPage() {
               ]}
             />
             <Input
-              label="Target Due Date"
+              label="Assigned Date *"
+              type="date"
+              value={projectAssignedDate}
+              onChange={(e) => setProjectAssignedDate(e.target.value)}
+              required
+            />
+            <Input
+              label="Due Date"
               type="date"
               value={projectDueDate}
+              min={projectAssignedDate || undefined}
               onChange={(e) => setProjectDueDate(e.target.value)}
             />
           </div>

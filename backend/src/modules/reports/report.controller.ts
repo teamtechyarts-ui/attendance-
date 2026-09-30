@@ -20,6 +20,7 @@ export class ReportController {
     const result = await ReportService.listReports({
       employeeId: query.employeeId,
       reportDate: query.reportDate,
+      adminView: query.adminView === 'true' || query.adminView === true,
       user: request.user!,
       page: query.page ? parseInt(query.page, 10) : 1,
       limit: query.limit ? parseInt(query.limit, 10) : 30,

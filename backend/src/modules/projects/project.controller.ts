@@ -20,6 +20,7 @@ export class ProjectController {
       search: query?.search,
       status: query?.status,
       employeeId,
+      adminView: query?.adminView === 'true' || query?.adminView === true,
     });
 
     return reply.send({

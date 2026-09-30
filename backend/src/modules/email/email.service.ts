@@ -246,7 +246,7 @@ export class EmailService {
    */
   public static async createAndNotify(params: {
     userId: string;
-    type: 'TASK' | 'TASK_REMINDER' | 'ATTENDANCE' | 'LEAVE' | 'FEEDBACK' | 'REPORT' | 'SYSTEM';
+    type: any;
     title: string;
     message: string;
     actionUrl?: string;
@@ -257,48 +257,15 @@ export class EmailService {
       text?: string;
     };
   }): Promise<any> {
-    const notification = await DbService.query(
-      async () => {
-        return await prisma.notification.create({
-          data: {
-            userId: params.userId,
-            type: params.type,
-            title: params.title,
-            message: params.message,
-            actionUrl: params.actionUrl || null,
-          },
-        });
-      },
-      async () => {
-        const res = await DbService.restRequest<any[]>('/notifications', {
-          method: 'POST',
-          body: {
-            user_id: params.userId,
-            type: params.type,
-            title: params.title,
-            message: params.message,
-            action_url: params.actionUrl || null,
-          },
-        });
-        return res[0];
-      }
-    );
-
-    // If email details are provided, send safely in background without blocking
-    if (params.email && notification?.id) {
-      this.sendEmail({
-        to: params.email.to,
-        subject: params.email.subject,
-        html: params.email.html,
-        text: params.email.text,
-        notificationId: notification.id,
-        userId: params.userId,
-      }).catch((err) => {
-        console.error('[EmailService] Background notification send error:', err.message);
-      });
-    }
-
-    return notification;
+    const { NotificationService } = await import('../notifications/notification.service.js');
+    return await NotificationService.createNotification({
+      userId: params.userId,
+      type: params.type,
+      title: params.title,
+      message: params.message,
+      actionUrl: params.actionUrl,
+      email: params.email,
+    });
   }
 
   // ==========================================

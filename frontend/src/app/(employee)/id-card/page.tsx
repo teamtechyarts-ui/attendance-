@@ -10,6 +10,7 @@ import { Badge } from '@/components/ui/badge';
 import { LoadingState } from '@/components/ui/loading-state';
 import { formatDate } from '@/lib/utils';
 import { CreditCard, Printer, ShieldCheck, QrCode } from 'lucide-react';
+import Image from "next/image";
 
 export default function DigitalIdPage() {
   const { user } = useAuth();
@@ -61,9 +62,9 @@ export default function DigitalIdPage() {
           <div className="flex items-center justify-between border-b border-neutral-200 pb-3">
             <div className="flex items-center gap-1.5 text-left">
               <div className="w-6 h-6 rounded bg-black flex items-center justify-center text-white font-black text-xs">
-                W
+                <Image src="/images/logo.png" alt="Logo" width={20} height={20} />
               </div>
-              <span className="font-extrabold text-xs tracking-tight">WORKOS</span>
+              <span className="font-extrabold text-xs tracking-tight">Techy Arts</span>
             </div>
             <Badge variant="success" className="text-[10px]">
               Active Badge

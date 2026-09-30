@@ -6,6 +6,7 @@ import { TaskService } from '../tasks/task.service.js';
 import { EmployeeService } from '../employees/employee.service.js';
 import { CreateCalendarEventInput, UpdateCalendarEventInput } from '../../validation/index.js';
 import { AuthUser, CalendarEvent } from '../../types/index.js';
+import { NotificationService } from '../notifications/notification.service.js';
 
 export class CalendarService {
   /**
@@ -358,7 +359,7 @@ export class CalendarService {
       }
     }
 
-    return DbService.query(
+    const created = await DbService.query(
       async () => {
         const event = await prisma.calendarEvent.create({
           data: {
@@ -390,7 +391,7 @@ export class CalendarService {
           }
         }
 
-        return await prisma.calendarEvent.findUnique({
+        const created = await prisma.calendarEvent.findUnique({
           where: { id: event.id },
           include: {
             attendees: {
@@ -402,6 +403,8 @@ export class CalendarService {
             },
           },
         });
+
+        return created;
       },
       async () => {
         const eventId = randomUUID();
@@ -482,13 +485,70 @@ export class CalendarService {
         };
       }
     );
+
+    // AFTER SUCCESSFUL DB SAVE: Notify attendees or company-wide
+    (async () => {
+      try {
+        if (visibility === 'EVERYONE') {
+          const activeEmps = await DbService.query(
+            async () =>
+              prisma.employee.findMany({
+                where: { employmentStatus: 'ACTIVE', user: { status: 'ACTIVE' } },
+                select: { id: true, userId: true },
+              }),
+            async () =>
+              DbService.restRequest<any[]>('/employees?employment_status=eq.ACTIVE&select=id,user_id')
+          );
+          const empIds = (activeEmps || []).map((e: any) => e.id).filter(Boolean);
+          const userMaps = await NotificationService.resolveUserIdsFromEmployeeIds(empIds);
+          const notifications = userMaps
+            .filter((u) => u.userId && u.userId !== user.id)
+            .map((u) => ({
+              userId: u.userId,
+              type: 'CALENDAR_EVENT_CREATED' as const,
+              title: `New Calendar Event: ${input.title}`,
+              message: `A new company event "${input.title}" has been scheduled for ${new Date(input.startAt).toLocaleDateString()}.`,
+              actionUrl: `/calendar`,
+              entityType: 'calendar_event',
+              entityId: created.id,
+              actorId: user.id,
+            }));
+          await NotificationService.createBulkNotifications(notifications);
+        } else {
+          const targetEmpIds = [
+            ...(input.employeeId ? [input.employeeId] : []),
+            ...(input.attendeeIds || []),
+          ];
+          if (targetEmpIds.length > 0) {
+            const userMaps = await NotificationService.resolveUserIdsFromEmployeeIds(targetEmpIds);
+            const notifications = userMaps
+              .filter((u) => u.userId && u.userId !== user.id)
+              .map((u) => ({
+                userId: u.userId,
+                type: 'CALENDAR_EVENT_CREATED' as const,
+                title: `Calendar Event: ${input.title}`,
+                message: `You have an event "${input.title}" on ${new Date(input.startAt).toLocaleDateString()}.`,
+                actionUrl: `/calendar`,
+                entityType: 'calendar_event',
+                entityId: created.id,
+                actorId: user.id,
+              }));
+            await NotificationService.createBulkNotifications(notifications);
+          }
+        }
+      } catch (err: any) {
+        console.error('[CalendarService] Failed to notify of calendar event creation:', err.message);
+      }
+    })();
+
+    return created;
   }
 
   /**
    * Update Calendar Event
    */
   public static async updateEvent(id: string, input: UpdateCalendarEventInput, user: AuthUser) {
-    return DbService.query(
+    const updated = await DbService.query(
       async () => {
         const existing = await prisma.calendarEvent.findUnique({
           where: { id },
@@ -508,7 +568,7 @@ export class CalendarService {
           throw err;
         }
 
-        const updated = await prisma.calendarEvent.update({
+        await prisma.calendarEvent.update({
           where: { id },
           data: {
             title: input.title !== undefined ? input.title : undefined,
@@ -560,15 +620,67 @@ export class CalendarService {
         return res[0];
       }
     );
+
+    // AFTER SUCCESSFUL DB UPDATE: Notify attendees
+    (async () => {
+      try {
+        const attendeeEmpIds = input.attendeeIds || (updated?.attendees ? updated.attendees.map((a: { employeeId: string }) => a.employeeId) : []);
+        const targetEmpIds = [
+          ...(input.employeeId ? [input.employeeId] : (updated?.employeeId ? [updated.employeeId] : [])),
+          ...attendeeEmpIds,
+        ];
+        if (targetEmpIds.length > 0) {
+          const userMaps = await NotificationService.resolveUserIdsFromEmployeeIds(targetEmpIds);
+          const notifications = userMaps
+            .filter((u) => u.userId && u.userId !== user.id)
+            .map((u) => ({
+              userId: u.userId,
+              type: 'CALENDAR_EVENT_UPDATED' as const,
+              title: `Calendar Event Updated: ${input.title || updated?.title || 'Event'}`,
+              message: `The event "${input.title || updated?.title || 'Event'}" has been updated.`,
+              actionUrl: `/calendar`,
+              entityType: 'calendar_event',
+              entityId: id,
+              actorId: user.id,
+            }));
+          await NotificationService.createBulkNotifications(notifications);
+        }
+      } catch (err: any) {
+        console.error('[CalendarService] Failed to notify of calendar event update:', err.message);
+      }
+    })();
+
+    return updated;
   }
 
   /**
    * Delete Calendar Event
    */
   public static async deleteEvent(id: string, user: AuthUser) {
-    return DbService.query(
+    let existingTitle = 'Event';
+    let targetEmpIds: string[] = [];
+
+    try {
+      const existing = await DbService.query(
+        async () => prisma.calendarEvent.findUnique({ where: { id }, include: { attendees: true } }),
+        async () => {
+          const evs = await DbService.restRequest<any[]>(`/calendar_events?id=eq.${id}`);
+          return evs?.[0] || null;
+        }
+      );
+      if (existing) {
+        existingTitle = existing.title || 'Event';
+        const attIds = existing.attendees ? existing.attendees.map((a: any) => a.employeeId) : [];
+        targetEmpIds = [...(existing.employeeId ? [existing.employeeId] : []), ...attIds];
+      }
+    } catch {}
+
+    await DbService.query(
       async () => {
-        const existing = await prisma.calendarEvent.findUnique({ where: { id } });
+        const existing = await prisma.calendarEvent.findUnique({
+          where: { id },
+          include: { attendees: true },
+        });
 
         if (!existing) {
           const err: any = new Error('Calendar event not found');
@@ -593,5 +705,31 @@ export class CalendarService {
         return { success: true, message: 'Calendar event deleted successfully' };
       }
     );
+
+    // AFTER SUCCESSFUL DB DELETION: Notify attendees of cancellation
+    if (targetEmpIds.length > 0) {
+      (async () => {
+        try {
+          const userMaps = await NotificationService.resolveUserIdsFromEmployeeIds(targetEmpIds);
+          const notifications = userMaps
+            .filter((u) => u.userId && u.userId !== user.id)
+            .map((u) => ({
+              userId: u.userId,
+              type: 'CALENDAR_EVENT_CANCELLED' as const,
+              title: `Calendar Event Cancelled: ${existingTitle}`,
+              message: `The event "${existingTitle}" has been cancelled.`,
+              actionUrl: `/calendar`,
+              entityType: 'calendar_event',
+              entityId: id,
+              actorId: user.id,
+            }));
+          await NotificationService.createBulkNotifications(notifications);
+        } catch (err: any) {
+          console.error('[CalendarService] Failed to notify of calendar event cancellation:', err.message);
+        }
+      })();
+    }
+
+    return { success: true, message: 'Calendar event deleted successfully' };
   }
 }

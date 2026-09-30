@@ -1,8 +1,44 @@
 import { FastifyReply, FastifyRequest } from 'fastify';
 import { EmployeeService } from './employee.service.js';
 import { createEmployeeSchema, updateEmployeeSchema, updateSelfProfileSchema } from '../../validation/index.js';
+import { RbacService } from '../../services/rbac.service.js';
 
 export class EmployeeController {
+  public static async listAssignable(request: FastifyRequest, reply: FastifyReply) {
+    const user = request.user!;
+    const query = request.query as any;
+
+    const canList =
+      user.role === 'SUPER_ADMIN' ||
+      user.role === 'ADMIN' ||
+      user.role === 'MANAGER' ||
+      RbacService.hasPermission(user, 'EMPLOYEE_VIEW') ||
+      RbacService.hasPermission(user, 'TASK_ASSIGN') ||
+      RbacService.hasPermission(user, 'TASK_CREATE') ||
+      RbacService.hasPermission(user, 'PROJECT_CREATE') ||
+      RbacService.hasPermission(user, 'PROJECT_UPDATE') ||
+      RbacService.hasPermission(user, 'TEAM_MEMBER_ADD') ||
+      RbacService.hasPermission(user, 'TEAM_VIEW');
+
+    if (!canList) {
+      return reply.status(403).send({
+        success: false,
+        error: { code: 'FORBIDDEN', message: 'You do not have permission to view assignable employees' },
+      });
+    }
+
+    const employees = await EmployeeService.listAssignableEmployees(user, {
+      search: query.search,
+      departmentId: query.departmentId,
+      projectId: query.projectId,
+    });
+
+    return reply.send({
+      success: true,
+      data: employees,
+    });
+  }
+
   public static async list(request: FastifyRequest, reply: FastifyReply) {
     const query = request.query as any;
     const result = await EmployeeService.listEmployees({
@@ -149,6 +185,14 @@ export class EmployeeController {
         error: { code, message: err.message },
       });
     }
+  }
+
+  public static async getNextCode(request: FastifyRequest, reply: FastifyReply) {
+    const nextCode = await EmployeeService.generateNextEmployeeCode();
+    return reply.send({
+      success: true,
+      data: { nextEmployeeCode: nextCode },
+    });
   }
 }
 

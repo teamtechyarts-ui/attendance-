@@ -1,20 +1,35 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useAuth } from '@/hooks/use-auth';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '@/components/ui/card';
+import { LoadingState } from '@/components/ui/loading-state';
 import { Lock, Mail, ArrowRight, ShieldCheck, Eye, EyeOff } from 'lucide-react';
 
 export default function LoginPage() {
-  const { login } = useAuth();
+  const { user, session, isLoading: isAuthLoading, login } = useAuth();
+  const router = useRouter();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+
+  useEffect(() => {
+    if (!isAuthLoading && user) {
+      if (session?.firstLoginRequired || session?.accessMode === 'FIRST_LOGIN_REQUIRED' || user.firstLoginRequired) {
+        router.replace('/change-password');
+      } else if (user.role === 'SUPER_ADMIN' || user.appRole === 'SUPER_ADMIN') {
+        router.replace('/admin/dashboard');
+      } else {
+        router.replace('/dashboard');
+      }
+    }
+  }, [user, session, isAuthLoading, router]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -25,10 +40,17 @@ export default function LoginPage() {
       await login({ email, password });
     } catch (err: any) {
       setError(err.message || 'Invalid email or password');
-    } finally {
       setIsLoading(false);
     }
   };
+
+  if (user) {
+    return (
+      <div className="min-h-[75vh] flex items-center justify-center">
+        <LoadingState message="Redirecting to workspace..." />
+      </div>
+    );
+  }
 
   const handleQuickLogin = (demoEmail: string, demoPass: string) => {
     setEmail(demoEmail);
@@ -112,7 +134,7 @@ export default function LoginPage() {
               </Button>
             </form>
           </CardContent>
-          <CardFooter className="flex-col items-start gap-3 bg-neutral-50/50 p-4 rounded-b-lg border-t border-neutral-100">
+          {/* <CardFooter className="flex-col items-start gap-3 bg-neutral-50/50 p-4 rounded-b-lg border-t border-neutral-100">
             <span className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider">Super Admin Account:</span>
             <div className="flex flex-wrap gap-2 w-full">
               <button
@@ -124,7 +146,7 @@ export default function LoginPage() {
                 <span className="block text-[10px] text-neutral-400 font-normal">teamtechyarts@gmail.com</span>
               </button>
             </div>
-          </CardFooter>
+          </CardFooter> */}
         </Card>
 
         <div className="flex items-center justify-center gap-2 text-xs text-neutral-400">

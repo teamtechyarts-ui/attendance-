@@ -13,7 +13,7 @@ export default function HomePage() {
     if (!isLoading) {
       if (!user) {
         router.replace('/login');
-      } else if (user.role === 'SUPER_ADMIN' || user.role === 'ADMIN') {
+      } else if (user.role === 'SUPER_ADMIN' || user.appRole === 'SUPER_ADMIN') {
         router.replace('/admin/dashboard');
       } else {
         router.replace('/dashboard');

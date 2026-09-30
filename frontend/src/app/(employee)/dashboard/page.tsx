@@ -31,7 +31,7 @@ export default function EmployeeDashboard() {
   const { user, session, accessMode, todayAttendance, markAttendanceSuccess } = useAuth();
   const { activeTimer, elapsedSeconds, startTimer, pauseTimer, stopTimer, refreshTimer } = useTaskTimer();
 
-  const [todayData, setTodayData] = useState<any>(null);
+  const [todayData, setTodayData] = useState<any>(() => todayAttendance);
   const [tasks, setTasks] = useState<any[]>([]);
   const [leaveBalances, setLeaveBalances] = useState<any[]>([]);
   const [todayReport, setTodayReport] = useState<any>(null);
@@ -42,16 +42,22 @@ export default function EmployeeDashboard() {
 
   const isRestricted = accessMode === 'RESTRICTED' || session?.attendanceRequired;
 
+  useEffect(() => {
+    if (todayAttendance && !todayData) {
+      setTodayData(todayAttendance);
+    }
+  }, [todayAttendance, todayData]);
+
   const loadData = useCallback(async () => {
     try {
       const [todayAtt, taskList, balances, report] = await Promise.all([
-        attendanceApi.getToday().catch(() => null),
+        todayAttendance ? Promise.resolve(todayAttendance) : attendanceApi.getToday().catch(() => null),
         tasksApi.list().catch(() => []),
         leaveApi.getBalances().catch(() => []),
         reportsApi.getToday().catch(() => null),
       ]);
 
-      setTodayData(todayAtt);
+      if (todayAtt) setTodayData(todayAtt);
       setTasks(taskList || []);
       setLeaveBalances(balances || []);
       setTodayReport(report);
@@ -61,7 +67,7 @@ export default function EmployeeDashboard() {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [todayAttendance]);
 
   useEffect(() => {
     loadData();
@@ -96,9 +102,43 @@ export default function EmployeeDashboard() {
     }
   };
 
-  if (isLoading) {
-    return <LoadingState message="Loading your workspace..." />;
-  }
+  const handleStart = async (taskId: string) => {
+    const res = await startTimer(taskId);
+    if (res && res.task) {
+      setTasks((prev) =>
+        prev.map((t) => {
+          if (t.id === taskId) {
+            return { ...t, ...res.task, status: 'IN_PROGRESS' };
+          }
+          if (t.status === 'IN_PROGRESS') {
+            return { ...t, status: 'PAUSED' };
+          }
+          return t;
+        })
+      );
+    }
+    loadData();
+  };
+
+  const handlePause = async (taskId: string) => {
+    const res = await pauseTimer(taskId);
+    if (res && res.task) {
+      setTasks((prev) =>
+        prev.map((t) => (t.id === taskId ? { ...t, ...res.task, status: 'PAUSED' } : t))
+      );
+    }
+    loadData();
+  };
+
+  const handleStop = async (taskId: string) => {
+    const res = await stopTimer(taskId);
+    if (res && res.task) {
+      setTasks((prev) =>
+        prev.map((t) => (t.id === taskId ? { ...t, ...res.task, status: 'COMPLETED' } : t))
+      );
+    }
+    loadData();
+  };
 
   const currentDate = new Date().toLocaleDateString('en-US', {
     weekday: 'long',
@@ -106,6 +146,25 @@ export default function EmployeeDashboard() {
     day: 'numeric',
     year: 'numeric',
   });
+
+  const focusTask =
+    activeTimer?.task ||
+    tasks.find((t) => t.id === activeTimer?.taskId) ||
+    tasks.find((t) => t.status === 'IN_PROGRESS') ||
+    tasks.find((t) => t.status === 'PAUSED') ||
+    (tasks.length > 0 ? tasks[0] : null);
+
+  const isTimerRunning = Boolean(activeTimer && activeTimer.isActive);
+  const isTimerPaused = Boolean(
+    (activeTimer && !activeTimer.isActive && activeTimer.status === 'PAUSED') ||
+    (!isTimerRunning && focusTask?.status === 'PAUSED')
+  );
+
+  const displaySeconds = isTimerRunning
+    ? elapsedSeconds
+    : isTimerPaused
+    ? (activeTimer?.durationSeconds ?? focusTask?.totalDurationSeconds ?? 0)
+    : (activeTimer ? elapsedSeconds : (focusTask?.totalDurationSeconds ?? 0));
 
   return (
     <div className="space-y-6">
@@ -148,15 +207,20 @@ export default function EmployeeDashboard() {
                 <span className="text-[11px] font-bold tracking-wider uppercase text-neutral-400">
                   Current Work Focus
                 </span>
-                {activeTimer && activeTimer.isActive && (
+                {isTimerRunning ? (
                   <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-neutral-800 text-emerald-400 text-xs font-mono">
                     <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
                     RECORDING
                   </span>
-                )}
+                ) : isTimerPaused ? (
+                  <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-neutral-800 text-amber-400 text-xs font-mono">
+                    <span className="w-2 h-2 rounded-full bg-amber-400" />
+                    PAUSED
+                  </span>
+                ) : null}
               </div>
               <CardTitle className="text-lg text-white font-bold mt-1">
-                {activeTimer?.task?.title || tasks.find((t) => t.status === 'IN_PROGRESS')?.title || 'No active task selected'}
+                {focusTask?.title || 'No active task selected'}
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4 pt-1">
@@ -166,15 +230,15 @@ export default function EmployeeDashboard() {
                     Session Duration
                   </span>
                   <span className="text-3xl sm:text-4xl font-mono font-black text-white tracking-widest">
-                    {formatSecondsToTime(elapsedSeconds)}
+                    {formatSecondsToTime(displaySeconds)}
                   </span>
                 </div>
 
                 <div className="flex items-center gap-2">
-                  {activeTimer && activeTimer.isActive ? (
+                  {isTimerRunning ? (
                     <>
                       <Button
-                        onClick={() => pauseTimer(activeTimer.taskId)}
+                        onClick={() => handlePause(activeTimer?.taskId || focusTask?.id!)}
                         variant="secondary"
                         size="sm"
                         className="bg-neutral-800 text-white hover:bg-neutral-700 border-0 gap-1.5"
@@ -182,26 +246,40 @@ export default function EmployeeDashboard() {
                         <Pause className="w-4 h-4" /> Pause
                       </Button>
                       <Button
-                        onClick={() => stopTimer(activeTimer.taskId)}
+                        onClick={() => handleStop(activeTimer?.taskId || focusTask?.id!)}
                         size="sm"
                         className="bg-white text-black hover:bg-neutral-200 gap-1.5 font-bold"
                       >
                         <Square className="w-4 h-4" /> Complete
                       </Button>
                     </>
-                  ) : (
+                  ) : isTimerPaused && focusTask ? (
                     <>
-                      {tasks.length > 0 && (
-                        <Button
-                          onClick={() => startTimer(tasks[0].id)}
-                          size="sm"
-                          className="bg-white text-black hover:bg-neutral-200 gap-1.5 font-bold"
-                        >
-                          <Play className="w-4 h-4" /> Start Timer
-                        </Button>
-                      )}
+                      <Button
+                        onClick={() => handleStart(focusTask.id)}
+                        size="sm"
+                        className="bg-white text-black hover:bg-neutral-200 gap-1.5 font-bold"
+                      >
+                        <Play className="w-4 h-4" /> Resume
+                      </Button>
+                      <Button
+                        onClick={() => handleStop(focusTask.id)}
+                        size="sm"
+                        variant="secondary"
+                        className="bg-neutral-800 text-white hover:bg-neutral-700 border-0 gap-1.5"
+                      >
+                        <Square className="w-4 h-4" /> Complete
+                      </Button>
                     </>
-                  )}
+                  ) : focusTask ? (
+                    <Button
+                      onClick={() => handleStart(focusTask.id)}
+                      size="sm"
+                      className="bg-white text-black hover:bg-neutral-200 gap-1.5 font-bold"
+                    >
+                      <Play className="w-4 h-4" /> Start Timer
+                    </Button>
+                  ) : null}
                 </div>
               </div>
             </CardContent>
@@ -231,6 +309,10 @@ export default function EmployeeDashboard() {
                 <div className="divide-y divide-neutral-100">
                   {tasks.slice(0, 5).map((task) => {
                     const isRunning = Boolean(activeTimer?.taskId === task.id && activeTimer?.isActive);
+                    const isPaused = Boolean(
+                      (activeTimer?.taskId === task.id && !activeTimer?.isActive && activeTimer?.status === 'PAUSED') ||
+                      (!isTimerRunning && task.status === 'PAUSED')
+                    );
                     return (
                       <div key={task.id} className="py-3 flex items-center justify-between gap-3">
                         <div className="space-y-1 min-w-0">
@@ -250,6 +332,11 @@ export default function EmployeeDashboard() {
                             >
                               {task.priority}
                             </Badge>
+                            {task.status === 'PAUSED' && (
+                              <Badge variant="warning" className="text-[10px]">
+                                Paused
+                              </Badge>
+                            )}
                           </div>
                           <p className="text-[11px] text-neutral-500 truncate">
                             {task.description || 'No description provided'}
@@ -258,7 +345,7 @@ export default function EmployeeDashboard() {
                         <div className="flex items-center gap-2 shrink-0">
                           {isRunning ? (
                             <Button
-                              onClick={() => pauseTimer(task.id)}
+                              onClick={() => handlePause(task.id)}
                               size="sm"
                               variant="secondary"
                               className="h-8 text-xs gap-1"
@@ -267,12 +354,12 @@ export default function EmployeeDashboard() {
                             </Button>
                           ) : (
                             <Button
-                              onClick={() => startTimer(task.id)}
+                              onClick={() => handleStart(task.id)}
                               size="sm"
                               variant="outline"
                               className="h-8 text-xs gap-1"
                             >
-                              <Play className="w-3 h-3" /> Start
+                              <Play className="w-3 h-3" /> {isPaused || (task.totalDurationSeconds && task.totalDurationSeconds > 0) ? 'Resume' : 'Start'}
                             </Button>
                           )}
                         </div>

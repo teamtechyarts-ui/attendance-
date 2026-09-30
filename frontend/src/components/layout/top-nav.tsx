@@ -8,7 +8,9 @@ import { useTaskTimer } from '@/hooks/use-task-timer';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { CheckInModal } from '@/components/attendance/check-in-modal';
+import { NotificationPopover } from '@/components/notifications/notification-popover';
 import { formatSecondsToTime } from '@/lib/utils';
+import { isSuperAdmin, isLimitedAdmin, getPermittedAdminModules } from '@/lib/permissions';
 import {
   Briefcase,
   Calendar,
@@ -29,23 +31,50 @@ import {
   Settings,
   Bell,
   BarChart2,
+  FolderKanban,
+  UserCheck,
+  ShieldAlert,
+  ArrowRight,
+  Check,
+  LucideIcon,
 } from 'lucide-react';
+
+const ICON_MAP: Record<string, LucideIcon> = {
+  Home,
+  Briefcase,
+  Calendar,
+  Clock,
+  FileText,
+  CreditCard,
+  Settings,
+  BarChart2,
+  FolderKanban,
+  Users,
+  UserCheck,
+  MessageSquare,
+};
 
 export function TopNav() {
   const pathname = usePathname();
   const router = useRouter();
   const { user, accessMode, todayAttendance, logout } = useAuth();
-  const { activeTimer, elapsedSeconds, pauseTimer, stopTimer } = useTaskTimer();
+  const { activeTimer, elapsedSeconds, startTimer, pauseTimer, stopTimer } = useTaskTimer();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isCheckInOpen, setIsCheckInOpen] = useState(false);
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
 
-  if (!user) return null;
+  const isPublicRoute = pathname === '/login' || pathname === '/forgot-password' || pathname === '/reset-password';
+  if (isPublicRoute) return null;
 
-  const isAdmin = user.role === 'SUPER_ADMIN' || user.role === 'ADMIN';
+  const superAdmin = isSuperAdmin(user);
+  const limitedAdmin = isLimitedAdmin(user);
 
-  // Navigation Items
-  const employeeNav = [
+  const isInAdminView = pathname.startsWith('/admin-view');
+  const isInSuperAdminView = pathname.startsWith('/admin') && !isInAdminView;
+  const isInEmployeeView = !isInAdminView && !isInSuperAdminView;
+
+  // Base Employee Navigation (Strictly 7 items for all employees in employee mode)
+  const baseEmployeeNav = [
     { label: 'Home', href: '/dashboard', icon: Home },
     { label: 'Tasks', href: '/tasks', icon: Briefcase },
     { label: 'Calendar', href: '/calendar', icon: Calendar },
@@ -55,7 +84,8 @@ export function TopNav() {
     { label: 'ID Card', href: '/id-card', icon: CreditCard },
   ];
 
-  const adminNav = [
+  // Super Admin Navigation
+  const superAdminNav = [
     { label: 'Overview', href: '/admin/dashboard', icon: BarChart2 },
     { label: 'People', href: '/admin/employees', icon: Users },
     { label: 'Work', href: '/admin/tasks', icon: Briefcase },
@@ -67,7 +97,24 @@ export function TopNav() {
     { label: 'Settings', href: '/admin/settings', icon: Settings },
   ];
 
-  const navItems = isAdmin ? adminNav : employeeNav;
+  // Limited Admin Navigation (Dynamic based on permissions)
+  const permittedModules = getPermittedAdminModules(user);
+  const limitedAdminNav = permittedModules.map((mod) => ({
+    label: mod.label,
+    href: mod.href,
+    icon: ICON_MAP[mod.iconName] || Briefcase,
+  }));
+
+  let navItems = baseEmployeeNav;
+  let logoHref = '/dashboard';
+
+  if (superAdmin || isInSuperAdminView) {
+    navItems = superAdminNav;
+    logoHref = '/admin/dashboard';
+  } else if (limitedAdmin && isInAdminView) {
+    navItems = limitedAdminNav;
+    logoHref = '/admin-view';
+  }
 
   return (
     <>
@@ -75,7 +122,7 @@ export function TopNav() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 flex items-center justify-between h-14">
           {/* Logo & Desktop Nav */}
           <div className="flex items-center gap-8">
-            <Link href={isAdmin ? '/admin/dashboard' : '/dashboard'} className="flex items-center gap-2.5">
+            <Link href={logoHref} className="flex items-center gap-2.5">
               <img
                 src="/images/logo.png"
                 alt="TeamsTechyArts"
@@ -84,13 +131,20 @@ export function TopNav() {
               <span className="font-extrabold text-sm tracking-tight text-neutral-900">
                 Teams<span className="text-neutral-400 font-normal">TechyArts</span>
               </span>
+              {isInAdminView && (
+                <Badge variant="secondary" className="hidden md:inline-flex text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 bg-neutral-100 text-neutral-800 border-neutral-300">
+                  Limited Admin
+                </Badge>
+              )}
             </Link>
 
             {/* Desktop Nav Items */}
             <nav className="hidden lg:flex items-center gap-1">
               {navItems.map((item) => {
                 const Icon = item.icon;
-                const isActive = pathname === item.href || (item.href !== '/dashboard' && item.href !== '/admin/dashboard' && pathname.startsWith(item.href));
+                const isExactRoot = item.href === '/dashboard' || item.href === '/admin/dashboard' || item.href === '/admin-view';
+                const isActive = isExactRoot ? pathname === item.href : pathname === item.href || pathname.startsWith(item.href + '/');
+
                 return (
                   <Link
                     key={item.href}
@@ -111,20 +165,34 @@ export function TopNav() {
 
           {/* Right Header Actions */}
           <div className="flex items-center gap-3">
-            {/* Live Task Timer Bar (if active) */}
-            {activeTimer && activeTimer.isActive && (
+            {/* Live Task Timer Bar (Works seamlessly across all views) */}
+            {activeTimer && activeTimer.taskId && (
               <div className="hidden sm:flex items-center gap-2 px-3 py-1 rounded-full bg-neutral-900 text-white text-xs border border-neutral-800 shadow-sm animate-in fade-in">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                {activeTimer.isActive ? (
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                ) : (
+                  <span className="w-2 h-2 rounded-full bg-amber-400" />
+                )}
                 <span className="font-mono font-bold tracking-wider">{formatSecondsToTime(elapsedSeconds)}</span>
                 <span className="text-neutral-400 text-[11px] max-w-[120px] truncate">{activeTimer.task?.title || 'Task Timer'}</span>
                 <div className="flex items-center gap-1 ml-1 pl-1 border-l border-neutral-700">
-                  <button
-                    onClick={() => pauseTimer(activeTimer.taskId)}
-                    aria-label="Pause Timer"
-                    className="p-1 hover:text-amber-400 transition-colors"
-                  >
-                    <Pause className="w-3 h-3" />
-                  </button>
+                  {activeTimer.isActive ? (
+                    <button
+                      onClick={() => pauseTimer(activeTimer.taskId)}
+                      aria-label="Pause Timer"
+                      className="p-1 hover:text-amber-400 transition-colors"
+                    >
+                      <Pause className="w-3 h-3" />
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => startTimer(activeTimer.taskId)}
+                      aria-label="Resume Timer"
+                      className="p-1 hover:text-emerald-400 transition-colors"
+                    >
+                      <Play className="w-3 h-3" />
+                    </button>
+                  )}
                   <button
                     onClick={() => stopTimer(activeTimer.taskId)}
                     aria-label="Complete Task"
@@ -136,8 +204,9 @@ export function TopNav() {
               </div>
             )}
 
-            {/* Attendance Quick Badge */}
-            {!isAdmin && (
+            {/* Attendance Quick Badge for Employee / Limited Admin */}
+            {/* Attendance Quick Badge for Employee / Limited Admin */}
+            {!superAdmin && !isInSuperAdminView && (
               <>
                 {todayAttendance && todayAttendance.checkInAt ? (
                   <Badge variant="success" className="hidden sm:inline-flex gap-1 text-[11px] font-semibold">
@@ -157,14 +226,8 @@ export function TopNav() {
               </>
             )}
 
-            {/* Notifications link */}
-            <Link
-              href="/notifications"
-              className="p-1.5 rounded-md text-neutral-600 hover:text-black hover:bg-neutral-100 transition-colors relative"
-              aria-label="Notifications"
-            >
-              <Bell className="w-4 h-4" />
-            </Link>
+            {/* Notifications Popover */}
+            <NotificationPopover />
 
             {/* User Profile & Menu */}
             <div className="relative">
@@ -174,42 +237,110 @@ export function TopNav() {
                 aria-label="User menu"
               >
                 <div className="w-7 h-7 rounded-full bg-neutral-900 text-white flex items-center justify-center font-bold text-xs">
-                  {user.displayName ? user.displayName.charAt(0).toUpperCase() : 'U'}
+                  {user?.displayName ? (
+                    user.displayName.charAt(0).toUpperCase()
+                  ) : (
+                    <User className="w-3.5 h-3.5 text-neutral-300" />
+                  )}
                 </div>
                 <span className="hidden md:inline text-xs font-semibold text-neutral-800 tracking-tight">
-                  {user.displayName || user.email}
+                  {user?.displayName || user?.email || 'Account'}
                 </span>
               </button>
 
               {isUserMenuOpen && (
-                <div className="absolute right-0 mt-2 w-56 rounded-md border border-neutral-200 bg-white p-1.5 shadow-lg z-50 text-xs">
+                <div className="absolute right-0 mt-2 w-64 rounded-md border border-neutral-200 bg-white p-1.5 shadow-lg z-50 text-xs animate-in fade-in zoom-in-95">
                   <div className="px-3 py-2 border-b border-neutral-100">
-                    <p className="font-bold text-neutral-900 truncate">{user.displayName}</p>
-                    <p className="text-neutral-500 text-[11px] truncate">{user.email}</p>
-                    <Badge variant="secondary" className="mt-1.5 text-[10px]">
-                      {user.role}
+                    <p className="font-bold text-neutral-900 truncate">{user?.displayName || 'User'}</p>
+                    <p className="text-neutral-500 text-[11px] truncate">{user?.email || ''}</p>
+                    <Badge variant="secondary" className="mt-1.5 text-[10px] font-bold">
+                      {superAdmin ? 'SUPER ADMIN' : limitedAdmin ? 'LIMITED ADMIN' : 'EMPLOYEE'}
                     </Badge>
                   </div>
+
                   <div className="py-1">
+                    {/* My Profile */}
                     <Link
                       href="/profile"
                       onClick={() => setIsUserMenuOpen(false)}
-                      className="flex items-center gap-2 px-3 py-2 rounded text-neutral-700 hover:bg-neutral-100 hover:text-black transition-colors"
+                      className="flex items-center justify-between px-3 py-2 rounded text-neutral-700 hover:bg-neutral-100 hover:text-black transition-colors"
                     >
-                      <User className="w-3.5 h-3.5" />
-                      My Profile
+                      <div className="flex items-center gap-2">
+                        <User className="w-3.5 h-3.5 text-neutral-500" />
+                        <span>My Profile</span>
+                      </div>
                     </Link>
-                    {isAdmin ? (
+
+                    {/* Employee View: Available for Normal Employee and Limited Admin ONLY (Super Admin never gets Employee View) */}
+                    {!superAdmin && (
                       <Link
                         href="/dashboard"
                         onClick={() => setIsUserMenuOpen(false)}
-                        className="flex items-center gap-2 px-3 py-2 rounded text-neutral-700 hover:bg-neutral-100 hover:text-black transition-colors"
+                        className={`flex items-center justify-between px-3 py-2 rounded transition-colors ${
+                          isInEmployeeView
+                            ? 'bg-neutral-100 text-neutral-900 font-semibold'
+                            : 'text-neutral-700 hover:bg-neutral-100 hover:text-black'
+                        }`}
                       >
-                        <Home className="w-3.5 h-3.5" />
-                        Employee View
+                        <div className="flex items-center gap-2">
+                          <Home className="w-3.5 h-3.5 text-neutral-500" />
+                          <span>Employee View</span>
+                        </div>
+                        {isInEmployeeView ? (
+                          <Check className="w-3.5 h-3.5 text-emerald-600 font-bold" />
+                        ) : (
+                          <ArrowRight className="w-3 h-3 text-neutral-400" />
+                        )}
                       </Link>
-                    ) : null}
+                    )}
+
+                    {/* Limited Admin View: Available ONLY for Limited Admin (Never for Super Admin or normal Employee) */}
+                    {!superAdmin && limitedAdmin && (
+                      <Link
+                        href="/admin-view"
+                        onClick={() => setIsUserMenuOpen(false)}
+                        className={`flex items-center justify-between px-3 py-2 rounded transition-colors ${
+                          isInAdminView
+                            ? 'bg-neutral-100 text-neutral-900 font-semibold'
+                            : 'text-neutral-700 hover:bg-neutral-100 hover:text-black'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <BarChart2 className="w-3.5 h-3.5 text-neutral-500" />
+                          <span>Limited Admin View</span>
+                        </div>
+                        {isInAdminView ? (
+                          <Check className="w-3.5 h-3.5 text-emerald-600 font-bold" />
+                        ) : (
+                          <ArrowRight className="w-3 h-3 text-neutral-400" />
+                        )}
+                      </Link>
+                    )}
+
+                    {/* Super Admin Dashboard Link: Available ONLY for Super Admin */}
+                    {superAdmin && (
+                      <Link
+                        href="/admin/dashboard"
+                        onClick={() => setIsUserMenuOpen(false)}
+                        className={`flex items-center justify-between px-3 py-2 rounded transition-colors ${
+                          isInSuperAdminView
+                            ? 'bg-neutral-100 text-neutral-900 font-semibold'
+                            : 'text-neutral-700 hover:bg-neutral-100 hover:text-black'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <BarChart2 className="w-3.5 h-3.5 text-neutral-500" />
+                          <span>Super Admin View</span>
+                        </div>
+                        {isInSuperAdminView ? (
+                          <Check className="w-3.5 h-3.5 text-emerald-600 font-bold" />
+                        ) : (
+                          <ArrowRight className="w-3 h-3 text-neutral-400" />
+                        )}
+                      </Link>
+                    )}
                   </div>
+
                   <div className="pt-1 border-t border-neutral-100">
                     <button
                       onClick={() => {
@@ -242,7 +373,7 @@ export function TopNav() {
           <div className="lg:hidden border-t border-neutral-200 bg-white px-4 py-3 space-y-1 animate-in slide-in-from-top-2">
             {navItems.map((item) => {
               const Icon = item.icon;
-              const isActive = pathname === item.href;
+              const isActive = pathname === item.href || (item.href !== '/dashboard' && item.href !== '/admin/dashboard' && item.href !== '/admin-view' && pathname.startsWith(item.href));
               return (
                 <Link
                   key={item.href}
@@ -257,7 +388,7 @@ export function TopNav() {
                 </Link>
               );
             })}
-            {!isAdmin && !todayAttendance?.checkInAt && (
+            {!superAdmin && !isInSuperAdminView && !todayAttendance?.checkInAt && (
               <div className="pt-2">
                 <Button
                   onClick={() => {

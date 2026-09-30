@@ -8,7 +8,7 @@ import { api } from '@/lib/api/client';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
-import { KeyRound, ShieldCheck, CheckCircle2, Lock, AlertCircle, ArrowRight } from 'lucide-react';
+import { KeyRound, ShieldCheck, CheckCircle2, Lock, AlertCircle, ArrowRight, Eye, EyeOff } from 'lucide-react';
 
 export default function ChangePasswordPage() {
   const router = useRouter();
@@ -17,6 +17,9 @@ export default function ChangePasswordPage() {
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [showCurrentPassword, setShowCurrentPassword] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -59,7 +62,7 @@ export default function ChangePasswordPage() {
       await refreshMe();
 
       setTimeout(() => {
-        if (user?.role === 'SUPER_ADMIN' || user?.role === 'ADMIN') {
+        if (user?.role === 'SUPER_ADMIN' || user?.appRole === 'SUPER_ADMIN') {
           router.push('/admin/dashboard');
         } else {
           router.push('/dashboard');
@@ -118,38 +121,83 @@ export default function ChangePasswordPage() {
                   </div>
                 )}
 
-                <Input
-                  id="currentPassword"
-                  label="Current / Temporary Password"
-                  type="password"
-                  placeholder="Enter temporary password"
-                  required
-                  autoComplete="current-password"
-                  value={currentPassword}
-                  onChange={(e) => setCurrentPassword(e.target.value)}
-                />
+                <div className="w-full space-y-1.5">
+                  <label htmlFor="currentPassword" className="block text-xs font-semibold text-neutral-700 tracking-tight">
+                    Current / Temporary Password
+                  </label>
+                  <div className="relative">
+                    <input
+                      id="currentPassword"
+                      type={showCurrentPassword ? 'text' : 'password'}
+                      placeholder="Enter temporary password"
+                      required
+                      autoComplete="current-password"
+                      value={currentPassword}
+                      onChange={(e) => setCurrentPassword(e.target.value)}
+                      className="flex h-9 w-full rounded-md border border-neutral-300 bg-white px-3 py-1 pr-10 text-sm shadow-sm transition-colors placeholder:text-neutral-400 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-black focus-visible:border-black disabled:cursor-not-allowed disabled:opacity-50"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowCurrentPassword(!showCurrentPassword)}
+                      aria-label={showCurrentPassword ? 'Hide current password' : 'Show current password'}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-neutral-500 hover:text-neutral-800 p-1 focus:outline-none"
+                    >
+                      {showCurrentPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
 
-                <Input
-                  id="newPassword"
-                  label="New Password"
-                  type="password"
-                  placeholder="At least 8 characters"
-                  required
-                  autoComplete="new-password"
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                />
+                <div className="w-full space-y-1.5">
+                  <label htmlFor="newPassword" className="block text-xs font-semibold text-neutral-700 tracking-tight">
+                    New Password
+                  </label>
+                  <div className="relative">
+                    <input
+                      id="newPassword"
+                      type={showNewPassword ? 'text' : 'password'}
+                      placeholder="At least 8 characters"
+                      required
+                      autoComplete="new-password"
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      className="flex h-9 w-full rounded-md border border-neutral-300 bg-white px-3 py-1 pr-10 text-sm shadow-sm transition-colors placeholder:text-neutral-400 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-black focus-visible:border-black disabled:cursor-not-allowed disabled:opacity-50"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowNewPassword(!showNewPassword)}
+                      aria-label={showNewPassword ? 'Hide new password' : 'Show new password'}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-neutral-500 hover:text-neutral-800 p-1 focus:outline-none"
+                    >
+                      {showNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
 
-                <Input
-                  id="confirmPassword"
-                  label="Confirm New Password"
-                  type="password"
-                  placeholder="Re-enter new password"
-                  required
-                  autoComplete="new-password"
-                  value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
-                />
+                <div className="w-full space-y-1.5">
+                  <label htmlFor="confirmPassword" className="block text-xs font-semibold text-neutral-700 tracking-tight">
+                    Confirm New Password
+                  </label>
+                  <div className="relative">
+                    <input
+                      id="confirmPassword"
+                      type={showConfirmPassword ? 'text' : 'password'}
+                      placeholder="Re-enter new password"
+                      required
+                      autoComplete="new-password"
+                      value={confirmPassword}
+                      onChange={(e) => setConfirmPassword(e.target.value)}
+                      className="flex h-9 w-full rounded-md border border-neutral-300 bg-white px-3 py-1 pr-10 text-sm shadow-sm transition-colors placeholder:text-neutral-400 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-black focus-visible:border-black disabled:cursor-not-allowed disabled:opacity-50"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+                      aria-label={showConfirmPassword ? 'Hide confirm password' : 'Show confirm password'}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-neutral-500 hover:text-neutral-800 p-1 focus:outline-none"
+                    >
+                      {showConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
 
                 {/* Password Requirements Checklist */}
                 <div className="p-3 bg-neutral-50 rounded-lg border border-neutral-200 text-xs space-y-1.5">

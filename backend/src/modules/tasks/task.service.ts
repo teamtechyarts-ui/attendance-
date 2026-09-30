@@ -7,6 +7,8 @@ import { EmailService } from '../../services/email.service.js';
 import { taskAssignedTemplate, taskReminderTemplate } from '../email/email.templates.js';
 import { config } from '../../config/env.js';
 import { EmployeeService } from '../employees/employee.service.js';
+import { RbacService } from '../../services/rbac.service.js';
+import { NotificationService } from '../notifications/notification.service.js';
 import { CreateTaskInput, UpdateTaskInput, CreateTaskCommentInput, CreateTaskMentionInput } from '../../validation/index.js';
 import { AuthUser, TaskStatus, TaskPriority, TaskSource } from '../../types/index.js';
 
@@ -65,6 +67,65 @@ export class TaskService {
   }
 
   /**
+   * Helper: Calculate worked seconds within a specific date range [periodStart, periodEnd]
+   */
+  public static calculateWorkedSecondsInPeriod(
+    timers: Array<{
+      durationSeconds?: number | null;
+      startedAt: Date | string;
+      pausedAt?: Date | string | null;
+      endedAt?: Date | string | null;
+      isActive: boolean;
+    }>,
+    periodStart: Date | null,
+    periodEnd: Date | null,
+    now: Date = new Date()
+  ): number {
+    if (!timers || timers.length === 0) return 0;
+    if (!periodStart && !periodEnd) {
+      return TaskService.calculateTaskWorkedSeconds(timers, now);
+    }
+
+    const pStartMs = periodStart ? periodStart.getTime() : 0;
+    const pEndMs = periodEnd ? periodEnd.getTime() : Number.MAX_SAFE_INTEGER;
+
+    let totalSeconds = 0;
+
+    for (const t of timers) {
+      const startMs = new Date(t.startedAt).getTime();
+      let endMs = startMs;
+
+      if (t.isActive) {
+        endMs = now.getTime();
+      } else if (t.endedAt) {
+        endMs = new Date(t.endedAt).getTime();
+      } else if (t.pausedAt) {
+        endMs = new Date(t.pausedAt).getTime();
+      } else {
+        const dur = t.durationSeconds || 0;
+        endMs = startMs + dur * 1000;
+      }
+
+      if (endMs <= startMs) {
+        const dur = t.durationSeconds || 0;
+        if (dur > 0) endMs = startMs + dur * 1000;
+        else if (t.isActive) endMs = now.getTime();
+      }
+
+      if (endMs < pStartMs || startMs > pEndMs) {
+        continue;
+      }
+
+      const overlapStartMs = Math.max(startMs, pStartMs);
+      const overlapEndMs = Math.min(endMs, pEndMs);
+      const overlapSec = Math.max(0, Math.floor((overlapEndMs - overlapStartMs) / 1000));
+      totalSeconds += overlapSec;
+    }
+
+    return totalSeconds;
+  }
+
+  /**
    * List Tasks with filtering, search, project filter, and accurate time calculation
    */
   public static async listTasks(params: {
@@ -73,35 +134,79 @@ export class TaskService {
     status?: string;
     priority?: string;
     search?: string;
+    adminView?: boolean;
     user: AuthUser;
     page?: number;
     limit?: number;
+    sortBy?: string;
+    sortOrder?: 'asc' | 'desc';
   }) {
     const page = Math.max(1, params.page || 1);
     const limit = Math.min(100, Math.max(1, params.limit || 50));
     const skip = (page - 1) * limit;
     const now = new Date();
+    const isSuper = params.user.role === 'SUPER_ADMIN' || params.user.appRole === 'SUPER_ADMIN';
+    const isLimited = params.user.appRole === 'LIMITED_ADMIN';
+    const isAdminContext = isSuper || (params.adminView && isLimited);
+
+    // Deterministic sort validation (whitelist-based, default createdAt desc)
+    const allowedSortFields = ['createdAt', 'updatedAt', 'dueDate', 'startDate', 'priority', 'status', 'title'];
+    const sortBy = allowedSortFields.includes(params.sortBy || '') ? params.sortBy! : 'createdAt';
+    const sortOrder = params.sortOrder?.toLowerCase() === 'asc' ? 'asc' : 'desc';
 
     return DbService.query(
       async () => {
         const where: any = {};
 
-        const targetEmpId =
-          params.user.role === 'EMPLOYEE' && !params.projectId
-            ? params.user.employeeId
-            : params.employeeId &&
-              params.employeeId !== 'undefined' &&
-              params.employeeId !== 'null' &&
-              params.employeeId.trim() !== ''
-            ? params.employeeId
-            : undefined;
+        if (isAdminContext) {
+          // Administrative Context
+          const hasTaskAdminPerm =
+            isSuper ||
+            RbacService.hasPermission(params.user, 'TASK_CREATE') ||
+            RbacService.hasPermission(params.user, 'TASK_ASSIGN') ||
+            RbacService.hasPermission(params.user, 'TASK_UPDATE') ||
+            RbacService.hasPermission(params.user, 'TASK_EDIT') ||
+            RbacService.hasPermission(params.user, 'TASK_DELETE') ||
+            RbacService.hasPermission(params.user, 'WORK_MANAGE') ||
+            RbacService.hasPermission(params.user, 'WORK_VIEW_DASHBOARD');
 
-        if (targetEmpId) {
-          where.employeeId = targetEmpId;
-        }
+          if (!hasTaskAdminPerm) {
+            const err: any = new Error('Forbidden: You do not have administrative permission to view team tasks');
+            err.statusCode = 403;
+            throw err;
+          }
 
-        if (params.projectId && params.projectId !== 'undefined' && params.projectId !== 'null' && params.projectId.trim() !== '') {
-          where.projectId = params.projectId;
+          if (params.employeeId && params.employeeId !== 'undefined' && params.employeeId !== 'null' && params.employeeId.trim() !== '') {
+            const hasScope = await RbacService.hasScopeAccess(params.user, { employeeId: params.employeeId });
+            if (!hasScope) {
+              const err: any = new Error('Forbidden: Assignee is outside your permitted administrative scope');
+              err.statusCode = 403;
+              throw err;
+            }
+            where.employeeId = params.employeeId;
+          } else if (params.user.scope?.employees && Array.isArray(params.user.scope.employees) && params.user.scope.employees.length > 0) {
+            where.employeeId = { in: params.user.scope.employees };
+          }
+
+          if (params.projectId && params.projectId !== 'undefined' && params.projectId !== 'null' && params.projectId.trim() !== '') {
+            const hasScope = await RbacService.hasScopeAccess(params.user, { projectId: params.projectId });
+            if (!hasScope) {
+              const err: any = new Error('Forbidden: Project is outside your permitted administrative scope');
+              err.statusCode = 403;
+              throw err;
+            }
+            where.projectId = params.projectId;
+          } else if (params.user.scope?.projects && Array.isArray(params.user.scope.projects) && params.user.scope.projects.length > 0) {
+            where.projectId = { in: params.user.scope.projects };
+          }
+        } else {
+          // Personal Employee Context (Employee View)
+          // ALWAYS restricted strictly to the authenticated employee's own tasks
+          where.employeeId = params.user.employeeId || '__NONE__';
+
+          if (params.projectId && params.projectId !== 'undefined' && params.projectId !== 'null' && params.projectId.trim() !== '') {
+            where.projectId = params.projectId;
+          }
         }
 
         if (params.status && params.status !== 'ALL') where.status = params.status;
@@ -127,7 +232,10 @@ export class TaskService {
                 },
               },
             },
-            orderBy: [{ status: 'asc' }, { updatedAt: 'desc' }],
+            orderBy: [
+              { [sortBy]: sortOrder },
+              { id: 'desc' },
+            ],
             skip,
             take: limit,
           }),
@@ -138,9 +246,11 @@ export class TaskService {
           const activeTimer = task.timers.find((t) => t.isActive) || null;
           const totalDuration = TaskService.calculateTaskWorkedSeconds(task.timers, now);
 
+          const dateStr = task.startDate ? task.startDate.toISOString().split('T')[0] : null;
           return {
             ...task,
-            startDate: task.startDate ? task.startDate.toISOString().split('T')[0] : null,
+            startDate: dateStr,
+            assignedDate: dateStr,
             dueDate: task.dueDate ? task.dueDate.toISOString().split('T')[0] : null,
             completedAt: task.completedAt ? task.completedAt.toISOString() : null,
             createdAt: task.createdAt.toISOString(),
@@ -162,11 +272,27 @@ export class TaskService {
         };
       },
       async () => {
-        let path = `/tasks?select=*,employee:employees(id,display_name,first_name,last_name,profile_photo_url),timers:task_timers(*)`;
-        if (params.user.role === 'EMPLOYEE' && params.user.employeeId && !params.projectId) {
-          path += `&employee_id=eq.${params.user.employeeId}`;
-        } else if (params.employeeId && params.employeeId !== 'undefined' && params.employeeId !== 'null' && params.employeeId.trim() !== '') {
-          path += `&employee_id=eq.${params.employeeId}`;
+        const restSortMap: Record<string, string> = {
+          createdAt: 'created_at',
+          updatedAt: 'updated_at',
+          dueDate: 'due_date',
+          startDate: 'start_date',
+          priority: 'priority',
+          status: 'status',
+          title: 'title',
+        };
+        const restSortCol = restSortMap[sortBy] || 'created_at';
+        let path = `/tasks?select=*,employee:employees(id,display_name,first_name,last_name,profile_photo_url),timers:task_timers(*)&order=${restSortCol}.${sortOrder},id.desc`;
+        if (isAdminContext) {
+          if (params.employeeId && params.employeeId !== 'undefined' && params.employeeId !== 'null' && params.employeeId.trim() !== '') {
+            path += `&employee_id=eq.${params.employeeId}`;
+          }
+        } else {
+          if (params.user.employeeId) {
+            path += `&employee_id=eq.${params.user.employeeId}`;
+          } else {
+            path += `&employee_id=eq.__NONE__`;
+          }
         }
         if (params.status && params.status !== 'ALL') path += `&status=eq.${params.status}`;
 
@@ -231,6 +357,7 @@ export class TaskService {
             status: task.status || 'TODO',
             priority: task.priority || 'MEDIUM',
             startDate: task.startDate || task.start_date || null,
+            assignedDate: task.startDate || task.start_date || null,
             dueDate: task.dueDate || task.due_date || null,
             estimatedMinutes: task.estimatedMinutes || task.estimated_minutes || null,
             completedAt: task.completedAt || task.completed_at || null,
@@ -252,9 +379,31 @@ export class TaskService {
           ? formatted.filter((t) => t.projectId === params.projectId)
           : formatted;
 
+        // Deterministic in-memory sort to guarantee client sorting
+        filtered.sort((a: any, b: any) => {
+          const valA = a[sortBy] ?? a[restSortCol];
+          const valB = b[sortBy] ?? b[restSortCol];
+          if (valA == null && valB == null) return 0;
+          if (valA == null) return sortOrder === 'asc' ? -1 : 1;
+          if (valB == null) return sortOrder === 'asc' ? 1 : -1;
+          if (sortBy === 'createdAt' || sortBy === 'updatedAt' || sortBy === 'dueDate' || sortBy === 'startDate') {
+            const timeA = new Date(valA).getTime();
+            const timeB = new Date(valB).getTime();
+            if (timeA !== timeB) return sortOrder === 'asc' ? timeA - timeB : timeB - timeA;
+          } else if (typeof valA === 'string') {
+            const cmp = valA.localeCompare(String(valB));
+            if (cmp !== 0) return sortOrder === 'asc' ? cmp : -cmp;
+          }
+          return String(b.id || '').localeCompare(String(a.id || ''));
+        });
+
+        const paginated = (params.page && params.limit)
+          ? filtered.slice(skip, skip + limit)
+          : filtered;
+
         return {
-          items: filtered,
-          meta: { page: 1, limit: filtered.length, total: filtered.length, totalPages: 1 },
+          items: paginated,
+          meta: { page, limit, total: filtered.length, totalPages: Math.ceil(filtered.length / limit) },
         };
       }
     );
@@ -333,9 +482,11 @@ export class TaskService {
         const activeTimer = task.timers.find((t) => t.isActive) || null;
         const totalDuration = TaskService.calculateTaskWorkedSeconds(task.timers, now);
 
+        const dateStr = task.startDate ? task.startDate.toISOString().split('T')[0] : null;
         return {
           ...task,
-          startDate: task.startDate ? task.startDate.toISOString().split('T')[0] : null,
+          startDate: dateStr,
+          assignedDate: dateStr,
           dueDate: task.dueDate ? task.dueDate.toISOString().split('T')[0] : null,
           completedAt: task.completedAt ? task.completedAt.toISOString() : null,
           createdAt: task.createdAt.toISOString(),
@@ -358,8 +509,12 @@ export class TaskService {
         const timers = task.timers || [];
         const activeTimer = timers.find((tm: any) => tm.isActive ?? tm.is_active) || null;
         const totalDuration = TaskService.calculateTaskWorkedSeconds(timers, now);
+        const dateStr = task.startDate || task.start_date || null;
         return {
           ...task,
+          startDate: dateStr,
+          assignedDate: dateStr,
+          dueDate: task.dueDate || task.due_date || null,
           activeTimer,
           totalDurationSeconds: totalDuration,
           totalWorkMinutes: Math.floor(totalDuration / 60),
@@ -441,6 +596,27 @@ export class TaskService {
       throw err;
     }
 
+    const isAssigningOther = targetEmployeeId !== user.employeeId;
+    if (isAssigningOther) {
+      if (!RbacService.hasPermission(user, 'TASK_ASSIGN')) {
+        const err: any = new Error('Forbidden: You do not have permission to assign tasks to other employees (TASK_ASSIGN required)');
+        err.statusCode = 403;
+        throw err;
+      }
+    } else {
+      if (!RbacService.hasPermission(user, 'TASK_CREATE')) {
+        const err: any = new Error('Forbidden: You do not have permission to create tasks (TASK_CREATE required)');
+        err.statusCode = 403;
+        throw err;
+      }
+    }
+
+    if (!(await RbacService.hasScopeAccess(user, { projectId: input.projectId, employeeId: targetEmployeeId }))) {
+      const err: any = new Error('Forbidden: The specified project or assignee is outside your assigned administrative scope');
+      err.statusCode = 403;
+      throw err;
+    }
+
     // Verify assignee is active
     const { exists, isEligible } = await EmployeeService.getEmployeeEligibility(targetEmployeeId);
     if (!exists) {
@@ -467,7 +643,10 @@ export class TaskService {
       }
     }
 
-    return DbService.query(
+    const assignedDateStr = input.assignedDate || input.startDate || new Date().toISOString().split('T')[0];
+    const dueDateStr = input.dueDate || null;
+
+    const createdTask = await DbService.query(
       async () => {
         const task = await prisma.task.create({
           data: {
@@ -479,8 +658,8 @@ export class TaskService {
             source,
             status: 'TODO',
             priority: input.priority || 'MEDIUM',
-            startDate: input.startDate ? new Date(input.startDate) : new Date(),
-            dueDate: input.dueDate ? new Date(input.dueDate) : null,
+            startDate: new Date(assignedDateStr),
+            dueDate: dueDateStr ? new Date(dueDateStr) : null,
             estimatedMinutes: input.estimatedMinutes || null,
             reminderEnabled: input.reminderEnabled || false,
             reminderAt: input.reminderAt ? new Date(input.reminderAt) : null,
@@ -505,14 +684,17 @@ export class TaskService {
               });
 
               // Dispatch in-app notification to mentioned employee
-              const emp = await prisma.employee.findUnique({ where: { id: empId }, select: { userId: true } });
-              if (emp?.userId) {
-                EmailService.createAndNotify({
+              const emp = await NotificationService.resolveUserIdFromEmployeeId(empId);
+              if (emp?.userId && emp.userId !== user.id) {
+                NotificationService.createNotification({
                   userId: emp.userId,
                   type: 'TASK',
                   title: `Mentioned in Task: ${task.title}`,
                   message: `${user.displayName || user.email} mentioned you in task "${task.title}".`,
                   actionUrl: `/tasks?taskId=${task.id}`,
+                  entityType: 'task',
+                  entityId: task.id,
+                  actorId: user.id,
                 }).catch((e) => console.error('[TaskService] Mention notification error:', e.message));
               }
             } catch (e) {
@@ -532,40 +714,10 @@ export class TaskService {
           userAgent: clientInfo.userAgent,
         });
 
-        // Dispatch in-app notification & task assignment email asynchronously
-        if (task.employee?.userId && task.employeeId !== user.employeeId) {
-          const empName = task.employee.displayName || `${task.employee.firstName} ${task.employee.lastName}`.trim();
-          const emailTpl = taskAssignedTemplate({
-            employeeName: empName,
-            taskTitle: task.title,
-            priority: task.priority,
-            dueDate: task.dueDate ? new Date(task.dueDate).toISOString().slice(0, 10) : undefined,
-            assignedBy: user.email || 'Admin',
-            taskUrl: `${config.corsOrigin}/tasks`,
-          });
-
-          EmailService.createAndNotify({
-            userId: task.employee.userId,
-            type: 'TASK',
-            title: `New Task Assigned: ${task.title}`,
-            message: `You have been assigned a new task: "${task.title}" (Priority: ${task.priority}).`,
-            actionUrl: `/tasks?taskId=${task.id}`,
-            email: task.employee.email
-              ? {
-                  to: task.employee.email,
-                  subject: emailTpl.subject,
-                  html: emailTpl.html,
-                  text: emailTpl.text,
-                }
-              : undefined,
-          }).catch((err) => {
-            console.error('[TaskService] Failed to dispatch task assignment notification:', err.message);
-          });
-        }
-
         return {
           ...task,
-          startDate: task.startDate ? task.startDate.toISOString().split('T')[0] : null,
+          startDate: task.startDate ? task.startDate.toISOString().split('T')[0] : assignedDateStr,
+          assignedDate: task.startDate ? task.startDate.toISOString().split('T')[0] : assignedDateStr,
           dueDate: task.dueDate ? task.dueDate.toISOString().split('T')[0] : null,
           createdAt: task.createdAt.toISOString(),
           updatedAt: task.updatedAt.toISOString(),
@@ -592,8 +744,8 @@ export class TaskService {
               source,
               status: 'TODO',
               priority: input.priority || 'MEDIUM',
-              start_date: input.startDate || null,
-              due_date: input.dueDate || null,
+              start_date: assignedDateStr,
+              due_date: dueDateStr,
               estimated_minutes: input.estimatedMinutes || null,
             },
           });
@@ -609,8 +761,8 @@ export class TaskService {
               source,
               status: 'TODO',
               priority: input.priority || 'MEDIUM',
-              start_date: input.startDate || null,
-              due_date: input.dueDate || null,
+              start_date: assignedDateStr,
+              due_date: dueDateStr,
               estimated_minutes: input.estimatedMinutes || null,
             },
           });
@@ -619,12 +771,70 @@ export class TaskService {
         const task = tasks[0];
         return {
           ...task,
+          startDate: assignedDateStr,
+          assignedDate: assignedDateStr,
+          dueDate: dueDateStr,
           projectId: input.projectId || task.projectId || task.project_id || null,
           totalDurationSeconds: 0,
           totalWorkMinutes: 0,
         };
       }
     );
+
+    const normalizedTask = {
+      ...createdTask,
+      startDate: createdTask.startDate ? (typeof createdTask.startDate === 'string' ? createdTask.startDate.split('T')[0] : new Date(createdTask.startDate).toISOString().split('T')[0]) : assignedDateStr,
+      assignedDate: createdTask.startDate ? (typeof createdTask.startDate === 'string' ? createdTask.startDate.split('T')[0] : new Date(createdTask.startDate).toISOString().split('T')[0]) : assignedDateStr,
+      dueDate: createdTask.dueDate ? (typeof createdTask.dueDate === 'string' ? createdTask.dueDate.split('T')[0] : new Date(createdTask.dueDate).toISOString().split('T')[0]) : null,
+      totalDurationSeconds: 0,
+      totalWorkMinutes: 0,
+    };
+
+    // AFTER SUCCESSFUL DB CREATION: Dispatch in-app notification & optional email to assignee
+    try {
+      const recipient = await NotificationService.resolveUserIdFromEmployeeId(targetEmployeeId);
+      if (recipient?.userId && recipient.userId !== user.id) {
+        const empName = recipient.displayName || 'Team Member';
+        const emailTpl = taskAssignedTemplate({
+          employeeName: empName,
+          taskTitle: normalizedTask.title,
+          priority: normalizedTask.priority,
+          dueDate: normalizedTask.dueDate || undefined,
+          assignedBy: user.displayName || user.email || 'Admin',
+          taskUrl: `${config.corsOrigin}/tasks`,
+        });
+
+        await NotificationService.createNotification({
+          userId: recipient.userId,
+          type: 'TASK_ASSIGNED',
+          title: `New Task Assigned: ${normalizedTask.title}`,
+          message: `You have been assigned a new task: "${normalizedTask.title}" (Priority: ${normalizedTask.priority}).`,
+          actionUrl: `/tasks?taskId=${normalizedTask.id}`,
+          entityType: 'task',
+          entityId: normalizedTask.id,
+          actorId: user.id,
+          metadata: {
+            taskId: normalizedTask.id,
+            projectId: normalizedTask.projectId || null,
+            priority: normalizedTask.priority,
+            assignedDate: normalizedTask.assignedDate,
+            dueDate: normalizedTask.dueDate,
+          },
+          email: recipient.email
+            ? {
+                to: recipient.email,
+                subject: emailTpl.subject,
+                html: emailTpl.html,
+                text: emailTpl.text,
+              }
+            : undefined,
+        });
+      }
+    } catch (notifErr: any) {
+      console.error('[TaskService] Failed to dispatch TASK_ASSIGNED notification:', notifErr.message);
+    }
+
+    return normalizedTask;
   }
 
   /**
@@ -638,7 +848,10 @@ export class TaskService {
   ) {
     const now = new Date();
 
-    return DbService.query(
+    // Fetch existing task to compare state for notifications
+    const existingTask = await TaskService.getTaskById(id, { ...user, role: 'SUPER_ADMIN' }).catch(() => null);
+
+    const updatedTask = await DbService.query(
       async () => {
         const existing = await prisma.task.findUnique({
           where: { id },
@@ -657,6 +870,27 @@ export class TaskService {
           throw err;
         }
 
+        if (isStaff) {
+          if (!RbacService.hasPermission(user, 'TASK_EDIT')) {
+            const err: any = new Error('Forbidden: You do not have permission to edit tasks (TASK_EDIT required)');
+            err.statusCode = 403;
+            throw err;
+          }
+          if (input.employeeId && input.employeeId !== existing.employeeId && !RbacService.hasPermission(user, 'TASK_ASSIGN')) {
+            const err: any = new Error('Forbidden: You do not have permission to reassign tasks (TASK_ASSIGN required)');
+            err.statusCode = 403;
+            throw err;
+          }
+          if (!(await RbacService.hasScopeAccess(user, {
+            projectId: input.projectId || existing.projectId || undefined,
+            employeeId: input.employeeId || existing.employeeId || undefined,
+          }))) {
+            const err: any = new Error('Forbidden: Task or assignee is outside your assigned administrative scope');
+            err.statusCode = 403;
+            throw err;
+          }
+        }
+
         const data: any = {};
         if (input.title !== undefined) data.title = input.title;
         if (input.description !== undefined) data.description = input.description;
@@ -665,7 +899,10 @@ export class TaskService {
         if (input.priority !== undefined) data.priority = input.priority;
         if (input.progressPercentage !== undefined) data.progressPercentage = input.progressPercentage;
         if (input.status !== undefined) data.status = input.status;
-        if (input.startDate !== undefined) data.startDate = input.startDate ? new Date(input.startDate) : null;
+        if (input.assignedDate !== undefined || input.startDate !== undefined) {
+          const d = input.assignedDate || input.startDate;
+          data.startDate = d ? new Date(d) : null;
+        }
         if (input.dueDate !== undefined) data.dueDate = input.dueDate ? new Date(input.dueDate) : null;
         if (input.estimatedMinutes !== undefined) data.estimatedMinutes = input.estimatedMinutes;
         if (input.reminderEnabled !== undefined) data.reminderEnabled = input.reminderEnabled;
@@ -734,9 +971,11 @@ export class TaskService {
           userAgent: clientInfo.userAgent,
         });
 
+        const dateStr = updated.startDate ? updated.startDate.toISOString().split('T')[0] : null;
         return {
           ...updated,
-          startDate: updated.startDate ? updated.startDate.toISOString().split('T')[0] : null,
+          startDate: dateStr,
+          assignedDate: dateStr,
           dueDate: updated.dueDate ? updated.dueDate.toISOString().split('T')[0] : null,
           completedAt: updated.completedAt ? updated.completedAt.toISOString() : null,
           createdAt: updated.createdAt.toISOString(),
@@ -746,13 +985,183 @@ export class TaskService {
         };
       },
       async () => {
-        const res = await DbService.restRequest(`/tasks?id=eq.${id}`, {
+        const now = new Date();
+        const patchData: any = { ...input };
+        if (input.assignedDate !== undefined) {
+          patchData.start_date = input.assignedDate || null;
+          delete patchData.assignedDate;
+        }
+        if (input.startDate !== undefined) {
+          patchData.start_date = input.startDate || null;
+        }
+        if (input.dueDate !== undefined) {
+          patchData.due_date = input.dueDate || null;
+        }
+        if (input.status === 'COMPLETED') {
+          patchData.completed_at = now.toISOString();
+          patchData.progress_percentage = 100;
+          const activeTimers = await DbService.restRequest<any[]>(
+            `/task_timers?task_id=eq.${id}&is_active=eq.true`
+          );
+          if (activeTimers && activeTimers.length > 0) {
+            for (const at of activeTimers) {
+              const atStartedAt = at.startedAt || at.started_at;
+              const diff = Math.max(0, DateTimeUtil.diffSeconds(atStartedAt, now));
+              const curDur = at.durationSeconds || at.duration_seconds || 0;
+              await DbService.restRequest(`/task_timers?id=eq.${at.id}`, {
+                method: 'PATCH',
+                body: {
+                  ended_at: now.toISOString(),
+                  duration_seconds: curDur + diff,
+                  is_active: false,
+                },
+              });
+            }
+          }
+        } else if (input.status) {
+          patchData.completed_at = null;
+        }
+
+        const res = await DbService.restRequest<any[]>(`/tasks?id=eq.${id}`, {
           method: 'PATCH',
-          body: input,
+          body: patchData,
         });
-        return res[0];
+
+        const allTimers = await DbService.restRequest<any[]>(`/task_timers?task_id=eq.${id}`);
+        const totalDuration = TaskService.calculateTaskWorkedSeconds(allTimers || [], now);
+        const refreshed = await DbService.restRequest<any[]>(`/tasks?id=eq.${id}&select=*,timers:task_timers(*)`);
+        const taskObj = refreshed?.[0] || res[0];
+
+        const dateStr = taskObj.startDate || taskObj.start_date || null;
+        return {
+          ...taskObj,
+          startDate: dateStr,
+          assignedDate: dateStr,
+          dueDate: taskObj.dueDate || taskObj.due_date || null,
+          totalDurationSeconds: totalDuration,
+          totalWorkMinutes: Math.floor(totalDuration / 60),
+        };
       }
     );
+
+    const normalizedUpdated = {
+      ...updatedTask,
+      startDate: updatedTask.startDate ? (typeof updatedTask.startDate === 'string' ? updatedTask.startDate.split('T')[0] : new Date(updatedTask.startDate).toISOString().split('T')[0]) : null,
+      assignedDate: updatedTask.startDate ? (typeof updatedTask.startDate === 'string' ? updatedTask.startDate.split('T')[0] : new Date(updatedTask.startDate).toISOString().split('T')[0]) : null,
+      dueDate: updatedTask.dueDate ? (typeof updatedTask.dueDate === 'string' ? updatedTask.dueDate.split('T')[0] : new Date(updatedTask.dueDate).toISOString().split('T')[0]) : null,
+    };
+
+    // AFTER SUCCESSFUL DB UPDATE: Dispatch notifications
+    if (existingTask) {
+      try {
+        // 1. Assignee Reassigned
+        if (input.employeeId && input.employeeId !== existingTask.employeeId) {
+          // Notify old assignee
+          const oldRecipient = await NotificationService.resolveUserIdFromEmployeeId(existingTask.employeeId);
+          if (oldRecipient?.userId && oldRecipient.userId !== user.id) {
+            await NotificationService.createNotification({
+              userId: oldRecipient.userId,
+              type: 'TASK_REASSIGNED',
+              title: `Task Reassigned: ${normalizedUpdated.title}`,
+              message: `Task "${normalizedUpdated.title}" is no longer assigned to you.`,
+              actionUrl: `/tasks`,
+              entityType: 'task',
+              entityId: id,
+              actorId: user.id,
+            });
+          }
+          // Notify new assignee
+          const newRecipient = await NotificationService.resolveUserIdFromEmployeeId(input.employeeId);
+          if (newRecipient?.userId && newRecipient.userId !== user.id) {
+            await NotificationService.createNotification({
+              userId: newRecipient.userId,
+              type: 'TASK_REASSIGNED',
+              title: `Task Assigned to You: ${normalizedUpdated.title}`,
+              message: `Task "${normalizedUpdated.title}" has been assigned to you.`,
+              actionUrl: `/tasks?taskId=${id}`,
+              entityType: 'task',
+              entityId: id,
+              actorId: user.id,
+            });
+          }
+        } else if (input.status && input.status !== existingTask.status) {
+          // 2. Status Changed
+          if (input.status === 'COMPLETED') {
+            // Notify task creator/admin
+            if (existingTask.createdBy && existingTask.createdBy !== user.id) {
+              await NotificationService.createNotification({
+                userId: existingTask.createdBy,
+                type: 'TASK_COMPLETED',
+                title: `Task Completed: ${normalizedUpdated.title}`,
+                message: `${user.displayName || user.email || 'An employee'} completed task "${normalizedUpdated.title}".`,
+                actionUrl: `/tasks?taskId=${id}`,
+                entityType: 'task',
+                entityId: id,
+                actorId: user.id,
+              });
+            }
+            // Notify assignee if someone else completed it
+            const assignee = await NotificationService.resolveUserIdFromEmployeeId(normalizedUpdated.employeeId);
+            if (assignee?.userId && assignee.userId !== user.id) {
+              await NotificationService.createNotification({
+                userId: assignee.userId,
+                type: 'TASK_STATUS_CHANGED',
+                title: `Task Completed: ${normalizedUpdated.title}`,
+                message: `Task "${normalizedUpdated.title}" was marked as completed.`,
+                actionUrl: `/tasks?taskId=${id}`,
+                entityType: 'task',
+                entityId: id,
+                actorId: user.id,
+              });
+            }
+          } else {
+            // Status changed (TODO -> IN_PROGRESS, IN_PROGRESS -> PAUSED, etc.)
+            const assignee = await NotificationService.resolveUserIdFromEmployeeId(normalizedUpdated.employeeId);
+            if (assignee?.userId && assignee.userId !== user.id) {
+              await NotificationService.createNotification({
+                userId: assignee.userId,
+                type: 'TASK_STATUS_CHANGED',
+                title: `Task Status Changed: ${normalizedUpdated.title}`,
+                message: `Status of "${normalizedUpdated.title}" changed from ${existingTask.status} to ${input.status}.`,
+                actionUrl: `/tasks?taskId=${id}`,
+                entityType: 'task',
+                entityId: id,
+                actorId: user.id,
+              });
+            }
+          }
+        } else {
+          // 3. Meaningful Details Updated
+          const hasMeaningfulChanges =
+            (input.title !== undefined && input.title !== existingTask.title) ||
+            (input.description !== undefined && input.description !== existingTask.description) ||
+            (input.priority !== undefined && input.priority !== existingTask.priority) ||
+            (input.dueDate !== undefined && input.dueDate !== existingTask.dueDate) ||
+            ((input.assignedDate !== undefined || input.startDate !== undefined) &&
+              (input.assignedDate || input.startDate) !== (existingTask.assignedDate || existingTask.startDate));
+
+          if (hasMeaningfulChanges) {
+            const assignee = await NotificationService.resolveUserIdFromEmployeeId(normalizedUpdated.employeeId);
+            if (assignee?.userId && assignee.userId !== user.id) {
+              await NotificationService.createNotification({
+                userId: assignee.userId,
+                type: 'TASK_UPDATED',
+                title: `Task Updated: ${normalizedUpdated.title}`,
+                message: `Details for task "${normalizedUpdated.title}" have been updated.`,
+                actionUrl: `/tasks?taskId=${id}`,
+                entityType: 'task',
+                entityId: id,
+                actorId: user.id,
+              });
+            }
+          }
+        }
+      } catch (err: any) {
+        console.error('[TaskService] Failed to dispatch task update notification:', err.message);
+      }
+    }
+
+    return normalizedUpdated;
   }
 
   /**
@@ -764,7 +1173,7 @@ export class TaskService {
     user: AuthUser,
     clientInfo: { ipAddress?: string; userAgent?: string }
   ) {
-    return DbService.query(
+    const resultComment = await DbService.query(
       async () => {
         const task = await prisma.task.findUnique({
           where: { id: taskId },
@@ -915,6 +1324,32 @@ export class TaskService {
         return newComment as any;
       }
     );
+
+    // AFTER SUCCESSFUL DB SAVE: Notify task assignee of new comment (if not the commenter)
+    try {
+      const task = await TaskService.getTaskById(taskId, { ...user, role: 'SUPER_ADMIN' }).catch(() => null);
+      if (task && task.employeeId) {
+        const assignee = await NotificationService.resolveUserIdFromEmployeeId(task.employeeId);
+        const mentionedIds = input.mentionedEmployeeIds || [];
+        if (assignee?.userId && assignee.userId !== user.id && !mentionedIds.includes(task.employeeId)) {
+          const preview = input.comment.length > 80 ? `${input.comment.slice(0, 80)}...` : input.comment;
+          await NotificationService.createNotification({
+            userId: assignee.userId,
+            type: 'TASK_COMMENTED',
+            title: `New Comment on Task: ${task.title}`,
+            message: `${user.displayName || user.email || 'Someone'}: "${preview}"`,
+            actionUrl: `/tasks?taskId=${taskId}`,
+            entityType: 'task',
+            entityId: taskId,
+            actorId: user.id,
+          });
+        }
+      }
+    } catch (err: any) {
+      console.error('[TaskService] Comment notification error:', err.message);
+    }
+
+    return resultComment;
   }
 
   /**
@@ -1105,8 +1540,15 @@ export class TaskService {
           const existingRunningTimer = task.timers.find((t) => t.isActive && t.employeeId === employeeId);
           if (existingRunningTimer) {
             const totalDuration = TaskService.calculateTaskWorkedSeconds(task.timers, now);
+            const priorClosedDurationSeconds = task.timers
+              .filter((t) => t.id !== existingRunningTimer.id)
+              .reduce((acc, t) => acc + (t.durationSeconds || 0), 0);
             return {
-              timer: existingRunningTimer,
+              timer: {
+                ...existingRunningTimer,
+                priorClosedDurationSeconds,
+                currentElapsedSeconds: totalDuration,
+              },
               task: {
                 ...task,
                 startDate: task.startDate ? task.startDate.toISOString().split('T')[0] : null,
@@ -1160,6 +1602,9 @@ export class TaskService {
           });
 
           const totalDuration = TaskService.calculateTaskWorkedSeconds(updatedTask.timers, now);
+          const priorClosedDurationSeconds = updatedTask.timers
+            .filter((t) => t.id !== createdTimer.id)
+            .reduce((acc, t) => acc + (t.durationSeconds || 0), 0);
 
           await AuditService.log({
             userId: user.id,
@@ -1173,7 +1618,11 @@ export class TaskService {
           });
 
           return {
-            timer: createdTimer,
+            timer: {
+              ...createdTimer,
+              priorClosedDurationSeconds,
+              currentElapsedSeconds: totalDuration,
+            },
             task: {
               ...updatedTask,
               startDate: updatedTask.startDate ? updatedTask.startDate.toISOString().split('T')[0] : null,
@@ -1221,7 +1670,59 @@ export class TaskService {
           throw err;
         }
 
-        const timers = await DbService.restRequest<any[]>('/task_timers', {
+        // Check if already running on THIS task
+        const activeTimersOnThisTask = await DbService.restRequest<any[]>(
+          `/task_timers?task_id=eq.${taskId}&employee_id=eq.${employeeId}&is_active=eq.true`
+        );
+        if (activeTimersOnThisTask && activeTimersOnThisTask.length > 0) {
+          const existingRunningTimer = activeTimersOnThisTask[0];
+          const allTimers = await DbService.restRequest<any[]>(`/task_timers?task_id=eq.${taskId}`);
+          const totalDuration = TaskService.calculateTaskWorkedSeconds(allTimers || [], now);
+          const priorClosedDurationSeconds = (allTimers || [])
+            .filter((t: any) => t.id !== existingRunningTimer.id)
+            .reduce((acc: number, t: any) => acc + (t.durationSeconds || t.duration_seconds || 0), 0);
+          return {
+            timer: {
+              ...existingRunningTimer,
+              priorClosedDurationSeconds,
+              currentElapsedSeconds: totalDuration,
+            },
+            task: {
+              ...task,
+              totalDurationSeconds: totalDuration,
+              totalWorkMinutes: Math.floor(totalDuration / 60),
+            },
+          };
+        }
+
+        // Pause other running timers for this employee
+        const otherActiveTimers = await DbService.restRequest<any[]>(
+          `/task_timers?employee_id=eq.${employeeId}&is_active=eq.true`
+        );
+        for (const ot of otherActiveTimers || []) {
+          const otStartedAt = ot.startedAt || ot.started_at;
+          const diff = Math.max(0, DateTimeUtil.diffSeconds(otStartedAt, now));
+          const currentDur = ot.durationSeconds || ot.duration_seconds || 0;
+          await DbService.restRequest(`/task_timers?id=eq.${ot.id}`, {
+            method: 'PATCH',
+            body: {
+              paused_at: now.toISOString(),
+              ended_at: now.toISOString(),
+              duration_seconds: currentDur + diff,
+              is_active: false,
+            },
+          });
+          const otherTaskId = ot.taskId || ot.task_id;
+          if (otherTaskId !== taskId) {
+            await DbService.restRequest(`/tasks?id=eq.${otherTaskId}`, {
+              method: 'PATCH',
+              body: { status: 'PAUSED' },
+            });
+          }
+        }
+
+        // Create new running timer interval
+        const createdTimers = await DbService.restRequest<any[]>('/task_timers', {
           method: 'POST',
           body: {
             task_id: taskId,
@@ -1231,15 +1732,33 @@ export class TaskService {
             is_active: true,
           },
         });
+        const createdTimer = createdTimers[0];
 
         await DbService.restRequest(`/tasks?id=eq.${taskId}`, {
           method: 'PATCH',
           body: { status: 'IN_PROGRESS' },
         });
 
+        const allTimers = await DbService.restRequest<any[]>(`/task_timers?task_id=eq.${taskId}`);
+        const totalDuration = TaskService.calculateTaskWorkedSeconds(allTimers || [], now);
+        const priorClosedDurationSeconds = (allTimers || [])
+          .filter((t: any) => t.id !== createdTimer.id)
+          .reduce((acc: number, t: any) => acc + (t.durationSeconds || t.duration_seconds || 0), 0);
+
+        const refreshedTask = await DbService.restRequest<any[]>(`/tasks?id=eq.${taskId}&select=*,timers:task_timers(*)`);
+
         return {
-          timer: timers[0],
-          task: { ...task, status: 'IN_PROGRESS' },
+          timer: {
+            ...createdTimer,
+            priorClosedDurationSeconds,
+            currentElapsedSeconds: totalDuration,
+          },
+          task: {
+            ...(refreshedTask?.[0] || task),
+            status: 'IN_PROGRESS',
+            totalDurationSeconds: totalDuration,
+            totalWorkMinutes: Math.floor(totalDuration / 60),
+          },
         };
       }
     );
@@ -1327,17 +1846,20 @@ export class TaskService {
           `/task_timers?task_id=eq.${taskId}&employee_id=eq.${employeeId}&is_active=eq.true`
         );
         if (activeTimers && activeTimers.length > 0) {
-          const t = activeTimers[0];
-          const diff = Math.max(0, DateTimeUtil.diffSeconds(t.startedAt || t.started_at, now));
-          await DbService.restRequest(`/task_timers?id=eq.${t.id}`, {
-            method: 'PATCH',
-            body: {
-              paused_at: now.toISOString(),
-              ended_at: now.toISOString(),
-              duration_seconds: (t.durationSeconds || t.duration_seconds || 0) + diff,
-              is_active: false,
-            },
-          });
+          for (const t of activeTimers) {
+            const tStartedAt = t.startedAt || t.started_at;
+            const diff = Math.max(0, DateTimeUtil.diffSeconds(tStartedAt, now));
+            const currentDur = t.durationSeconds || t.duration_seconds || 0;
+            await DbService.restRequest(`/task_timers?id=eq.${t.id}`, {
+              method: 'PATCH',
+              body: {
+                paused_at: now.toISOString(),
+                ended_at: now.toISOString(),
+                duration_seconds: currentDur + diff,
+                is_active: false,
+              },
+            });
+          }
         }
 
         await DbService.restRequest(`/tasks?id=eq.${taskId}`, {
@@ -1345,12 +1867,14 @@ export class TaskService {
           body: { status: 'PAUSED' },
         });
 
+        const allTimers = await DbService.restRequest<any[]>(`/task_timers?task_id=eq.${taskId}`);
+        const totalDuration = TaskService.calculateTaskWorkedSeconds(allTimers || [], now);
         const refreshed = await DbService.restRequest<any[]>(`/tasks?id=eq.${taskId}&select=*,timers:task_timers(*)`);
-        const totalDuration = TaskService.calculateTaskWorkedSeconds(refreshed?.[0]?.timers || [], now);
 
         return {
           task: {
-            ...refreshed[0],
+            ...(refreshed?.[0] || {}),
+            status: 'PAUSED',
             totalDurationSeconds: totalDuration,
             totalWorkMinutes: Math.floor(totalDuration / 60),
           },
@@ -1445,17 +1969,19 @@ export class TaskService {
           `/task_timers?task_id=eq.${taskId}&employee_id=eq.${employeeId}&is_active=eq.true`
         );
         if (activeTimers && activeTimers.length > 0) {
-          const t = activeTimers[0];
-          const diff = Math.max(0, DateTimeUtil.diffSeconds(t.startedAt || t.started_at, now));
-          const currentDur = t.durationSeconds || t.duration_seconds || 0;
-          await DbService.restRequest(`/task_timers?id=eq.${t.id}`, {
-            method: 'PATCH',
-            body: {
-              ended_at: now.toISOString(),
-              duration_seconds: currentDur + diff,
-              is_active: false,
-            },
-          });
+          for (const t of activeTimers) {
+            const tStartedAt = t.startedAt || t.started_at;
+            const diff = Math.max(0, DateTimeUtil.diffSeconds(tStartedAt, now));
+            const currentDur = t.durationSeconds || t.duration_seconds || 0;
+            await DbService.restRequest(`/task_timers?id=eq.${t.id}`, {
+              method: 'PATCH',
+              body: {
+                ended_at: now.toISOString(),
+                duration_seconds: currentDur + diff,
+                is_active: false,
+              },
+            });
+          }
         }
 
         await DbService.restRequest(`/tasks?id=eq.${taskId}`, {
@@ -1467,12 +1993,14 @@ export class TaskService {
           },
         });
 
+        const allTimers = await DbService.restRequest<any[]>(`/task_timers?task_id=eq.${taskId}`);
+        const totalDuration = TaskService.calculateTaskWorkedSeconds(allTimers || [], now);
         const refreshed = await DbService.restRequest<any[]>(`/tasks?id=eq.${taskId}&select=*,timers:task_timers(*)`);
-        const totalDuration = TaskService.calculateTaskWorkedSeconds(refreshed?.[0]?.timers || [], now);
 
         return {
           task: {
-            ...refreshed[0],
+            ...(refreshed?.[0] || {}),
+            status: 'COMPLETED',
             totalDurationSeconds: totalDuration,
             totalWorkMinutes: Math.floor(totalDuration / 60),
           },
@@ -1633,10 +2161,19 @@ export class TaskService {
   /**
    * Get Time Tracking Summary & Project Analytics
    */
-  public static async getTimeSummary(user: AuthUser, params: { employeeId?: string } = {}) {
+  public static async getTimeSummary(
+    user: AuthUser,
+    params: {
+      employeeId?: string;
+      period?: string;
+      startDate?: string;
+      endDate?: string;
+    } = {}
+  ) {
     const now = new Date();
+    const isSuper = user.role === 'SUPER_ADMIN' || user.appRole === 'SUPER_ADMIN';
     const targetEmpId =
-      user.role === 'EMPLOYEE'
+      !isSuper && user.role === 'EMPLOYEE' && user.appRole !== 'LIMITED_ADMIN'
         ? user.employeeId
         : params.employeeId &&
           params.employeeId !== 'undefined' &&
@@ -1644,6 +2181,8 @@ export class TaskService {
           params.employeeId.trim() !== ''
         ? params.employeeId
         : undefined;
+
+    const periodRange = DateTimeUtil.getPeriodDateRange(params.period || 'ALL_TIME', params.startDate, params.endDate);
 
     return DbService.query(
       async () => {
@@ -1661,15 +2200,33 @@ export class TaskService {
         });
 
         let totalWorkedSeconds = 0;
+        let allTimeWorkedSeconds = 0;
         let totalActiveTimers = 0;
         let completedTasksCount = 0;
 
-        const employeeAggregates: Record<string, { employee: any; totalWorkedSeconds: number; taskCount: number; completedCount: number }> = {};
+        const employeeAggregates: Record<
+          string,
+          {
+            employee: any;
+            totalWorkedSeconds: number;
+            allTimeWorkedSeconds: number;
+            taskCount: number;
+            completedCount: number;
+          }
+        > = {};
         const statusCounts: Record<string, number> = { TODO: 0, IN_PROGRESS: 0, PAUSED: 0, COMPLETED: 0, CANCELLED: 0 };
 
         for (const task of tasks) {
-          const taskWorked = TaskService.calculateTaskWorkedSeconds(task.timers, now);
-          totalWorkedSeconds += taskWorked;
+          const taskWorkedInPeriod = TaskService.calculateWorkedSecondsInPeriod(
+            task.timers,
+            periodRange.startDate,
+            periodRange.endDate,
+            now
+          );
+          const taskWorkedAllTime = TaskService.calculateTaskWorkedSeconds(task.timers, now);
+
+          totalWorkedSeconds += taskWorkedInPeriod;
+          allTimeWorkedSeconds += taskWorkedAllTime;
 
           if (task.timers.some((t) => t.isActive)) totalActiveTimers++;
           if (task.status === 'COMPLETED') completedTasksCount++;
@@ -1680,11 +2237,13 @@ export class TaskService {
             employeeAggregates[empId] = {
               employee: task.employee,
               totalWorkedSeconds: 0,
+              allTimeWorkedSeconds: 0,
               taskCount: 0,
               completedCount: 0,
             };
           }
-          employeeAggregates[empId].totalWorkedSeconds += taskWorked;
+          employeeAggregates[empId].totalWorkedSeconds += taskWorkedInPeriod;
+          employeeAggregates[empId].allTimeWorkedSeconds += taskWorkedAllTime;
           employeeAggregates[empId].taskCount++;
           if (task.status === 'COMPLETED') employeeAggregates[empId].completedCount++;
         }
@@ -1696,11 +2255,18 @@ export class TaskService {
           totalWorkedSeconds,
           totalWorkedMinutes: Math.floor(totalWorkedSeconds / 60),
           totalWorkedHours: parseFloat((totalWorkedSeconds / 3600).toFixed(2)),
+          allTimeWorkedSeconds,
+          allTimeWorkedHours: parseFloat((allTimeWorkedSeconds / 3600).toFixed(2)),
+          period: periodRange.period,
+          startDate: periodRange.startStr,
+          endDate: periodRange.endStr,
           statusBreakdown: statusCounts,
           employeeBreakdown: Object.values(employeeAggregates).map((item) => ({
             ...item,
             totalWorkedMinutes: Math.floor(item.totalWorkedSeconds / 60),
             totalWorkedHours: parseFloat((item.totalWorkedSeconds / 3600).toFixed(2)),
+            allTimeWorkedMinutes: Math.floor(item.allTimeWorkedSeconds / 60),
+            allTimeWorkedHours: parseFloat((item.allTimeWorkedSeconds / 3600).toFixed(2)),
           })),
         };
       },
@@ -1712,17 +2278,47 @@ export class TaskService {
         const tasks = await DbService.restRequest<any[]>(path);
 
         let totalWorkedSeconds = 0;
+        let allTimeWorkedSeconds = 0;
         let totalActiveTimers = 0;
         let completedTasksCount = 0;
 
-        const employeeAggregates: Record<string, { employee: any; totalWorkedSeconds: number; taskCount: number; completedCount: number }> = {};
+        const employeeAggregates: Record<
+          string,
+          {
+            employee: any;
+            totalWorkedSeconds: number;
+            allTimeWorkedSeconds: number;
+            taskCount: number;
+            completedCount: number;
+          }
+        > = {};
         const statusCounts: Record<string, number> = { TODO: 0, IN_PROGRESS: 0, PAUSED: 0, COMPLETED: 0, CANCELLED: 0 };
 
         for (const task of tasks || []) {
-          const timers = task.timers || [];
-          const taskWorked = TaskService.calculateTaskWorkedSeconds(timers, now);
-          totalWorkedSeconds += taskWorked;
-          if (timers.some((t: any) => t.isActive ?? t.is_active)) totalActiveTimers++;
+          const rawTimers = task.timers || [];
+          const timers = rawTimers.map((t: any) => ({
+            id: t.id,
+            taskId: t.taskId || t.task_id,
+            employeeId: t.employeeId || t.employee_id,
+            startedAt: t.startedAt || t.started_at,
+            pausedAt: t.pausedAt || t.paused_at || null,
+            endedAt: t.endedAt || t.ended_at || null,
+            durationSeconds: t.durationSeconds ?? t.duration_seconds ?? 0,
+            isActive: t.isActive ?? t.is_active ?? false,
+          }));
+
+          const taskWorkedInPeriod = TaskService.calculateWorkedSecondsInPeriod(
+            timers,
+            periodRange.startDate,
+            periodRange.endDate,
+            now
+          );
+          const taskWorkedAllTime = TaskService.calculateTaskWorkedSeconds(timers, now);
+
+          totalWorkedSeconds += taskWorkedInPeriod;
+          allTimeWorkedSeconds += taskWorkedAllTime;
+
+          if (timers.some((t: any) => t.isActive)) totalActiveTimers++;
           if (task.status === 'COMPLETED') completedTasksCount++;
           if (statusCounts[task.status] !== undefined) statusCounts[task.status]++;
 
@@ -1732,11 +2328,13 @@ export class TaskService {
               employeeAggregates[empId] = {
                 employee: task.employee,
                 totalWorkedSeconds: 0,
+                allTimeWorkedSeconds: 0,
                 taskCount: 0,
                 completedCount: 0,
               };
             }
-            employeeAggregates[empId].totalWorkedSeconds += taskWorked;
+            employeeAggregates[empId].totalWorkedSeconds += taskWorkedInPeriod;
+            employeeAggregates[empId].allTimeWorkedSeconds += taskWorkedAllTime;
             employeeAggregates[empId].taskCount++;
             if (task.status === 'COMPLETED') employeeAggregates[empId].completedCount++;
           }
@@ -1749,14 +2347,68 @@ export class TaskService {
           totalWorkedSeconds,
           totalWorkedMinutes: Math.floor(totalWorkedSeconds / 60),
           totalWorkedHours: parseFloat((totalWorkedSeconds / 3600).toFixed(2)),
+          allTimeWorkedSeconds,
+          allTimeWorkedHours: parseFloat((allTimeWorkedSeconds / 3600).toFixed(2)),
+          period: periodRange.period,
+          startDate: periodRange.startStr,
+          endDate: periodRange.endStr,
           statusBreakdown: statusCounts,
           employeeBreakdown: Object.values(employeeAggregates).map((item) => ({
             ...item,
             totalWorkedMinutes: Math.floor(item.totalWorkedSeconds / 60),
             totalWorkedHours: parseFloat((item.totalWorkedSeconds / 3600).toFixed(2)),
+            allTimeWorkedMinutes: Math.floor(item.allTimeWorkedSeconds / 60),
+            allTimeWorkedHours: parseFloat((item.allTimeWorkedSeconds / 3600).toFixed(2)),
           })),
         };
       }
     );
   }
+
+  /**
+   * Delete Task
+   */
+  public static async deleteTask(
+    id: string,
+    user: AuthUser,
+    clientInfo: { ipAddress?: string; userAgent?: string }
+  ) {
+    if (!RbacService.hasPermission(user, 'TASK_DELETE')) {
+      const err: any = new Error('Forbidden: You do not have permission to delete tasks (TASK_DELETE required)');
+      err.statusCode = 403;
+      throw err;
+    }
+
+    const task = await TaskService.getTaskById(id, user);
+    if (!task) {
+      const err: any = new Error('Task not found');
+      err.statusCode = 404;
+      throw err;
+    }
+
+    if (!(await RbacService.hasScopeAccess(user, { projectId: task.projectId, employeeId: task.employeeId }))) {
+      const err: any = new Error('Forbidden: Target task is outside your authorized administrative scope');
+      err.statusCode = 403;
+      throw err;
+    }
+
+    await DbService.query(
+      async () => prisma.task.delete({ where: { id } }),
+      async () => DbService.restRequest(`/tasks?id=eq.${id}`, { method: 'DELETE' })
+    );
+
+    await AuditService.log({
+      userId: user.id,
+      employeeId: user.employeeId || undefined,
+      action: 'DELETE',
+      entityType: 'task',
+      entityId: id,
+      description: `Deleted task "${task.title}"`,
+      ipAddress: clientInfo.ipAddress,
+      userAgent: clientInfo.userAgent,
+    });
+
+    return { deleted: true, id };
+  }
 }
+

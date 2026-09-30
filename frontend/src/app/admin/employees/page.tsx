@@ -262,8 +262,12 @@ export default function AdminEmployeesPage() {
       {/* Directory Table */}
       <Card>
         <CardContent className="p-0">
-          {isLoading ? (
-            <LoadingState message="Loading directory..." />
+          {isLoading && employees.length === 0 ? (
+            <div className="space-y-3 p-5 animate-pulse">
+              <div className="h-8 bg-neutral-100 rounded w-full"></div>
+              <div className="h-8 bg-neutral-100 rounded w-full"></div>
+              <div className="h-8 bg-neutral-100 rounded w-full"></div>
+            </div>
           ) : employees.length === 0 ? (
             <div className="p-8">
               <EmptyState

@@ -37,16 +37,21 @@ export default function AdminFeedbackPage() {
 
   const loadData = useCallback(async () => {
     try {
-      const [list, emps] = await Promise.all([feedbackApi.list(), employeesApi.list()]);
+      const [list, emps] = await Promise.all([
+        feedbackApi.list({ adminView: true }),
+        employeesApi.list(),
+      ]);
       setFeedbacks(list || []);
       setEmployees(emps || []);
-      if (emps && emps.length > 0 && !targetEmpId) setTargetEmpId(emps[0].id);
+      if (emps && emps.length > 0) {
+        setTargetEmpId((prev) => prev || emps[0].id);
+      }
     } catch {
       // ignore
     } finally {
       setIsLoading(false);
     }
-  }, [targetEmpId]);
+  }, []);
 
   useEffect(() => {
     loadData();
@@ -96,8 +101,14 @@ export default function AdminFeedbackPage() {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {isLoading ? (
-          <div className="col-span-2"><LoadingState message="Loading performance reviews..." /></div>
+        {isLoading && feedbacks.length === 0 ? (
+          [1, 2].map((i) => (
+            <Card key={i} className="p-5 space-y-4 animate-pulse">
+              <div className="h-5 bg-neutral-200 rounded w-1/3 mb-2"></div>
+              <div className="h-4 bg-neutral-100 rounded w-1/2"></div>
+              <div className="h-16 bg-neutral-100 rounded w-full"></div>
+            </Card>
+          ))
         ) : feedbacks.length === 0 ? (
           <div className="col-span-2">
             <EmptyState

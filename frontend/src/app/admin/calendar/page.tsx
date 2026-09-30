@@ -144,19 +144,16 @@ export default function AdminCalendarPage() {
       </div>
 
       <Card className="p-4">
-        {isLoading ? (
-          <LoadingState message="Loading calendar..." />
-        ) : (
-          <div className="space-y-4">
-            <div className="grid grid-cols-7 gap-1 text-center font-bold text-xs uppercase tracking-wider text-neutral-500 pb-2 border-b border-neutral-200">
-              <span className="text-neutral-400">Sun</span>
-              <span>Mon</span>
-              <span>Tue</span>
-              <span>Wed</span>
-              <span>Thu</span>
-              <span>Fri</span>
-              <span className="text-neutral-400">Sat</span>
-            </div>
+        <div className="space-y-4">
+          <div className="grid grid-cols-7 gap-1 text-center font-bold text-xs uppercase tracking-wider text-neutral-500 pb-2 border-b border-neutral-200">
+            <span className="text-neutral-400">Sun</span>
+            <span>Mon</span>
+            <span>Tue</span>
+            <span>Wed</span>
+            <span>Thu</span>
+            <span>Fri</span>
+            <span className="text-neutral-400">Sat</span>
+          </div>
 
             <div className="grid grid-cols-7 gap-1">
               {blanks.map((b) => (
@@ -207,7 +204,6 @@ export default function AdminCalendarPage() {
               })}
             </div>
           </div>
-        )}
       </Card>
 
       {/* Create Event Modal */}

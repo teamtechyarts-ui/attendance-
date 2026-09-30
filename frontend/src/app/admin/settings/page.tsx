@@ -1,8 +1,9 @@
 'use client';
 
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
-import { metadataApi, api } from '@/lib/api';
-import { Department, Designation, WorkSchedule, AuditLog } from '@/types';
+import { metadataApi, api, rbacApi } from '@/lib/api';
+import { Department, Designation, WorkSchedule, AuditLog, LimitedAdminAssignment } from '@/types';
+import { ManageAccessModal } from '@/components/admin/manage-access-modal';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -27,15 +28,32 @@ import {
   Star,
   AlertTriangle,
   RotateCcw,
+  KeyRound,
+  Users,
+  Lock,
+  Unlock,
+  Settings2,
 } from 'lucide-react';
 
 export default function AdminSettingsPage() {
-  const [activeTab, setActiveTab] = useState('audit');
+  const [activeTab, setActiveTab] = useState('rbac');
   const [departments, setDepartments] = useState<Department[]>([]);
   const [designations, setDesignations] = useState<Designation[]>([]);
   const [schedules, setSchedules] = useState<WorkSchedule[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  const [adminAssignments, setAdminAssignments] = useState<LimitedAdminAssignment[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+
+  // RBAC Access Control Filters & Modal
+  const [rbacSearch, setRbacSearch] = useState('');
+  const [rbacRoleFilter, setRbacRoleFilter] = useState<'ALL' | 'SUPER_ADMIN' | 'LIMITED_ADMIN' | 'EMPLOYEE'>('ALL');
+  const [managingAccessEmployee, setManagingAccessEmployee] = useState<{
+    id: string;
+    displayName: string;
+    email: string;
+    employeeCode?: string | null;
+    departmentName?: string | null;
+  } | null>(null);
 
   // Search & Status filters
   const [deptSearch, setDeptSearch] = useState('');
@@ -86,16 +104,18 @@ export default function AdminSettingsPage() {
 
   const loadData = useCallback(async () => {
     try {
-      const [depts, desigs, scheds, logsRes] = await Promise.all([
+      const [depts, desigs, scheds, logsRes, assignmentsRes] = await Promise.all([
         metadataApi.getDepartments({ includeInactive: true }).catch(() => []),
         metadataApi.getDesignations({ includeInactive: true }).catch(() => []),
         metadataApi.getWorkSchedules().catch(() => []),
         api.get('/api/audit').catch(() => []),
+        rbacApi.getAssignments().catch(() => []),
       ]);
       setDepartments(depts || []);
       setDesignations(desigs || []);
       setSchedules(scheds || []);
       setAuditLogs(logsRes || []);
+      setAdminAssignments(assignmentsRes || []);
     } catch {
       // ignore
     } finally {
@@ -384,7 +404,28 @@ export default function AdminSettingsPage() {
     });
   }, [schedules, schedSearch]);
 
+  const filteredAssignments = useMemo(() => {
+    return adminAssignments.filter((a) => {
+      const q = rbacSearch.toLowerCase();
+      const matchesSearch =
+        !rbacSearch ||
+        a.displayName.toLowerCase().includes(q) ||
+        a.email.toLowerCase().includes(q) ||
+        (a.employeeCode && a.employeeCode.toLowerCase().includes(q)) ||
+        (a.departmentName && a.departmentName.toLowerCase().includes(q));
+
+      const matchesRole =
+        rbacRoleFilter === 'ALL' ||
+        (rbacRoleFilter === 'SUPER_ADMIN' && a.isSuperAdmin) ||
+        (rbacRoleFilter === 'LIMITED_ADMIN' && a.isLimitedAdmin) ||
+        (rbacRoleFilter === 'EMPLOYEE' && !a.isSuperAdmin && !a.isLimitedAdmin);
+
+      return matchesSearch && matchesRole;
+    });
+  }, [adminAssignments, rbacSearch, rbacRoleFilter]);
+
   const tabs = [
+    { id: 'rbac', label: 'Roles & Permissions', count: adminAssignments.filter((a) => a.isLimitedAdmin || a.isSuperAdmin).length, icon: <KeyRound className="w-3.5 h-3.5" /> },
     { id: 'audit', label: 'Security Audit Logs', icon: <Shield className="w-3.5 h-3.5" /> },
     { id: 'departments', label: 'Departments', count: departments.length, icon: <Building2 className="w-3.5 h-3.5" /> },
     { id: 'designations', label: 'Designations', count: designations.length, icon: <Briefcase className="w-3.5 h-3.5" /> },
@@ -397,12 +438,186 @@ export default function AdminSettingsPage() {
         <div>
           <h1 className="text-2xl font-extrabold tracking-tight text-neutral-900">System Settings & Master Data</h1>
           <p className="text-xs text-neutral-500 mt-0.5">
-            Manage organization departments, job designations, shift schedules, and audit records.
+            Manage organization departments, job designations, shift schedules, RBAC access control, and audit records.
           </p>
         </div>
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab} tabs={tabs} />
+
+      {/* ========================================== */}
+      {/* TAB 0: ROLES & PERMISSIONS (RBAC)         */}
+      {/* ========================================== */}
+      {activeTab === 'rbac' && (
+        <Card>
+          <CardHeader className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <CardTitle className="text-sm">Role-Based Access Control (RBAC)</CardTitle>
+              <CardDescription>
+                Super Admin can grant granular Limited Admin privileges (Tasks, Projects, Teams, Work, Attendance, Leave, Reports) to senior employees.
+              </CardDescription>
+            </div>
+            <div className="flex items-center gap-2">
+              <Badge variant="outline" className="text-xs bg-neutral-50 font-mono">
+                Active Admins: {adminAssignments.filter((a) => a.isLimitedAdmin || a.isSuperAdmin).length}
+              </Badge>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {/* Filters */}
+            <div className="flex flex-col sm:flex-row gap-2 pt-1 pb-2">
+              <div className="relative flex-1">
+                <Search className="w-4 h-4 text-neutral-400 absolute left-3 top-2.5" />
+                <Input
+                  placeholder="Search by employee name, email, employee code, or department..."
+                  value={rbacSearch}
+                  onChange={(e) => setRbacSearch(e.target.value)}
+                  className="pl-9 h-9 text-xs"
+                />
+              </div>
+              <Select
+                value={rbacRoleFilter}
+                onChange={(e) => setRbacRoleFilter(e.target.value as any)}
+                options={[
+                  { value: 'ALL', label: 'All Access Levels' },
+                  { value: 'SUPER_ADMIN', label: 'Super Admins Only' },
+                  { value: 'LIMITED_ADMIN', label: 'Limited Admins Only' },
+                  { value: 'EMPLOYEE', label: 'Standard Employees' },
+                ]}
+                className="w-full sm:w-48 h-9 text-xs"
+              />
+            </div>
+
+            {/* Table */}
+            {isLoading ? (
+              <LoadingState message="Loading access control assignments..." />
+            ) : filteredAssignments.length === 0 ? (
+              <EmptyState
+                title="No users found"
+                description={rbacSearch || rbacRoleFilter !== 'ALL' ? 'Try adjusting your search filters.' : 'No employees are registered in the directory.'}
+              />
+            ) : (
+              <div className="border border-neutral-200 rounded-xl overflow-hidden shadow-sm">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Employee</TableHead>
+                      <TableHead>Role & Access Level</TableHead>
+                      <TableHead>Permissions Granted</TableHead>
+                      <TableHead>Administrative Scope</TableHead>
+                      <TableHead className="text-right">Actions</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {filteredAssignments.map((assign) => (
+                      <TableRow key={assign.userId} className="hover:bg-neutral-50/60 transition-colors">
+                        <TableCell>
+                          <div className="flex items-center gap-3">
+                            <div className="w-8 h-8 rounded-full bg-neutral-900 text-white flex items-center justify-center font-bold text-xs">
+                              {(assign.displayName || 'E').charAt(0).toUpperCase()}
+                            </div>
+                            <div>
+                              <div className="flex items-center gap-1.5">
+                                <span className="font-bold text-xs text-neutral-900">{assign.displayName}</span>
+                                {assign.employeeCode && (
+                                  <Badge variant="outline" className="text-[10px] font-mono px-1 py-0">
+                                    {assign.employeeCode}
+                                  </Badge>
+                                )}
+                              </div>
+                              <span className="text-[11px] text-neutral-500 block">
+                                {assign.email} {assign.departmentName ? `• ${assign.departmentName}` : ''}
+                              </span>
+                            </div>
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          {assign.isSuperAdmin ? (
+                            <Badge className="bg-indigo-600 hover:bg-indigo-700 text-white text-[10px] font-semibold gap-1">
+                              <Shield className="w-3 h-3" /> Super Admin
+                            </Badge>
+                          ) : assign.isLimitedAdmin ? (
+                            <Badge variant="secondary" className="bg-sky-50 text-sky-700 border-sky-200 text-[10px] font-semibold gap-1">
+                              <Unlock className="w-3 h-3 text-sky-600" /> Limited Admin
+                            </Badge>
+                          ) : (
+                            <Badge variant="outline" className="text-neutral-500 border-neutral-200 text-[10px]">
+                              Standard Employee
+                            </Badge>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          {assign.isSuperAdmin ? (
+                            <span className="text-xs text-neutral-700 font-medium">Universal (All 32 Permissions)</span>
+                          ) : assign.isLimitedAdmin && assign.config ? (
+                            <div className="space-y-0.5">
+                              <span className="text-xs font-bold text-emerald-700">
+                                {assign.config.permissions.length} granular permissions
+                              </span>
+                              <p className="text-[10px] text-neutral-500 truncate max-w-xs">
+                                {assign.config.permissions.slice(0, 4).join(', ')}
+                                {assign.config.permissions.length > 4 ? ` +${assign.config.permissions.length - 4} more` : ''}
+                              </p>
+                            </div>
+                          ) : (
+                            <span className="text-xs text-neutral-400">Standard employee permissions</span>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          {assign.isSuperAdmin ? (
+                            <span className="text-xs text-neutral-600 font-medium">Global (All entities)</span>
+                          ) : assign.isLimitedAdmin && assign.config?.scope ? (
+                            <div className="text-xs text-neutral-700">
+                              {assign.config.scope.projectIds?.length
+                                ? `${assign.config.scope.projectIds.length} Projects`
+                                : ''}
+                              {assign.config.scope.departmentIds?.length
+                                ? `${assign.config.scope.projectIds?.length ? ', ' : ''}${assign.config.scope.departmentIds.length} Depts`
+                                : ''}
+                              {!assign.config.scope.projectIds?.length && !assign.config.scope.departmentIds?.length
+                                ? 'Global (All entities)'
+                                : ''}
+                            </div>
+                          ) : assign.isLimitedAdmin ? (
+                            <span className="text-xs text-neutral-600">Global (All entities)</span>
+                          ) : (
+                            <span className="text-xs text-neutral-400">Self only</span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {assign.isSuperAdmin ? (
+                            <Badge variant="outline" className="text-[10px] text-neutral-400 border-neutral-200">
+                              <Lock className="w-2.5 h-2.5 mr-1" /> Protected
+                            </Badge>
+                          ) : (
+                            <Button
+                              size="sm"
+                              variant={assign.isLimitedAdmin ? 'primary' : 'outline'}
+                              onClick={() =>
+                                setManagingAccessEmployee({
+                                  id: assign.employeeId || assign.userId,
+                                  displayName: assign.displayName,
+                                  email: assign.email,
+                                  employeeCode: assign.employeeCode,
+                                  departmentName: assign.departmentName,
+                                })
+                              }
+                              className="text-xs gap-1.5 h-7"
+                            >
+                              <Settings2 className="w-3.5 h-3.5" />
+                              {assign.isLimitedAdmin ? 'Manage Access' : 'Grant Limited Admin'}
+                            </Button>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {/* ========================================== */}
       {/* TAB 1: AUDIT LOGS                          */}
@@ -1146,6 +1361,18 @@ export default function AdminSettingsPage() {
           </div>
         </div>
       </Dialog>
+
+      {/* RBAC Access Control Modal */}
+      {managingAccessEmployee && (
+        <ManageAccessModal
+          isOpen={Boolean(managingAccessEmployee)}
+          onClose={() => setManagingAccessEmployee(null)}
+          employee={managingAccessEmployee}
+          onSuccess={() => {
+            loadData();
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -1,74 +1,126 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { prisma } from '../../plugins/prisma.js';
-import { DbService } from '../../services/db.service.js';
+import { PassThrough } from 'stream';
 import { authenticate } from '../../middleware/auth.js';
+import { NotificationService } from './notification.service.js';
 
 export async function notificationRoutes(fastify: FastifyInstance) {
   fastify.addHook('preHandler', authenticate);
 
-  // Get notifications
+  // Get notifications with pagination and optional unread filter
   fastify.get('/', async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.user!.id;
-    const items = await DbService.query(
-      async () => {
-        return await prisma.notification.findMany({
-          where: { userId },
-          orderBy: { createdAt: 'desc' },
-          take: 50,
-        });
-      },
-      async () => {
-        return await DbService.restRequest(`/notifications?user_id=eq.${userId}&order=created_at.desc&limit=50`);
-      }
-    );
+    const query = request.query as { page?: string; limit?: string; unreadOnly?: string };
+    
+    const page = query.page ? parseInt(query.page, 10) : 1;
+    const limit = query.limit ? parseInt(query.limit, 10) : 20;
+    const unreadOnly = query.unreadOnly === 'true' || query.unreadOnly === '1';
 
-    return reply.send({ success: true, data: items });
+    const result = await NotificationService.getNotifications({
+      userId,
+      page,
+      limit,
+      unreadOnly,
+    });
+
+    return reply.send({
+      success: true,
+      data: result.items,
+      meta: {
+        page: result.page,
+        limit: result.limit,
+        total: result.total,
+        totalPages: result.totalPages,
+        unreadCount: result.unreadCount,
+      },
+    });
   });
 
-  // Mark single as read
+  // Get unread notification count
+  fastify.get('/unread-count', async (request: FastifyRequest, reply: FastifyReply) => {
+    const userId = request.user!.id;
+    const count = await NotificationService.getUnreadCount(userId);
+    return reply.send({ success: true, data: { unreadCount: count } });
+  });
+
+  // Server-Sent Events (SSE) Live Stream Endpoint
+  fastify.get('/stream', async (request: FastifyRequest, reply: FastifyReply) => {
+    const userId = request.user!.id;
+
+    const stream = new PassThrough();
+
+    reply
+      .header('Content-Type', 'text/event-stream')
+      .header('Cache-Control', 'no-cache, no-transform')
+      .header('Connection', 'keep-alive')
+      .header('X-Accel-Buffering', 'no');
+
+    // Send initial connected heartbeat
+    stream.write(`event: connected\ndata: ${JSON.stringify({ userId, connectedAt: new Date().toISOString() })}\n\n`);
+
+    // Listen for user notifications
+    const unsubscribe = NotificationService.subscribe(userId, (notification) => {
+      try {
+        if (!stream.destroyed) {
+          stream.write(`event: notification\ndata: ${JSON.stringify(notification)}\n\n`);
+        }
+      } catch {
+        // Socket closed
+      }
+    });
+
+    // Keep connection alive with periodic comment pings
+    const interval = setInterval(() => {
+      try {
+        if (!stream.destroyed) {
+          stream.write(': ping\n\n');
+        } else {
+          clearInterval(interval);
+        }
+      } catch {
+        clearInterval(interval);
+      }
+    }, 25000);
+
+    // Clean up on disconnect or error
+    const cleanup = () => {
+      clearInterval(interval);
+      unsubscribe();
+      if (!stream.destroyed) {
+        stream.end();
+      }
+    };
+
+    request.raw.on('close', cleanup);
+    stream.on('error', cleanup);
+
+    return reply.send(stream);
+  });
+
+  // Mark single notification as read
   fastify.patch('/:id/read', async (request: FastifyRequest, reply: FastifyReply) => {
     const { id } = request.params as { id: string };
-    const now = new Date();
+    const userId = request.user!.id;
 
-    const updated = await DbService.query(
-      async () => {
-        return await prisma.notification.update({
-          where: { id, userId: request.user!.id },
-          data: { isRead: true, readAt: now },
-        });
-      },
-      async () => {
-        const res = await DbService.restRequest(`/notifications?id=eq.${id}&user_id=eq.${request.user!.id}`, {
-          method: 'PATCH',
-          body: { is_read: true, read_at: now.toISOString() },
-        });
-        return res[0];
-      }
-    );
-
-    return reply.send({ success: true, data: updated });
+    await NotificationService.markAsRead(id, userId);
+    return reply.send({ success: true, data: { id, isRead: true, readAt: new Date().toISOString() } });
   });
 
-  // Mark all as read
-  fastify.post('/read-all', async (request: FastifyRequest, reply: FastifyReply) => {
+  // Mark all as read (POST and PATCH supported)
+  const markAllHandler = async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.user!.id;
-    const now = new Date();
+    const count = await NotificationService.markAllAsRead(userId);
+    return reply.send({ success: true, data: { message: 'All notifications marked as read', count } });
+  };
 
-    await DbService.query(
-      async () => {
-        await prisma.notification.updateMany({
-          where: { userId, isRead: false },
-          data: { isRead: true, readAt: now },
-        });
-      },
-      async () => {
-        await DbService.restRequest(`/notifications?user_id=eq.${userId}&is_read=eq.false`, {
-          method: 'PATCH',
-          body: { is_read: true, read_at: now.toISOString() },
-        });
-      }
-    );
+  fastify.post('/read-all', markAllHandler);
+  fastify.patch('/read-all', markAllHandler);
 
-    return reply.send({ success: true, data: { message: 'All notifications marked as read' } });
+  // Delete single notification
+  fastify.delete('/:id', async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id } = request.params as { id: string };
+    const userId = request.user!.id;
+
+    await NotificationService.deleteNotification(id, userId);
+    return reply.send({ success: true, data: { message: 'Notification deleted', id } });
   });
 }

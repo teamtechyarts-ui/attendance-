@@ -54,7 +54,7 @@ export default function AdminDashboard() {
       const [m, live, taskList] = await Promise.all([
         attendanceApi.getMetrics(),
         attendanceApi.getLiveOverview(),
-        tasksApi.list().catch(() => []),
+        tasksApi.list({ adminView: true }).catch(() => []),
       ]);
       setMetrics(m);
       setActivities(Array.isArray(live) ? live : []);
@@ -80,11 +80,38 @@ export default function AdminDashboard() {
     return () => clearInterval(interval);
   }, [loadDashboard]);
 
-  // Live ticking seconds for running timers
-  const [ticker, setTicker] = useState(0);
+  // Live ticking milliseconds for running timers
+  const [currentTimeMs, setCurrentTimeMs] = useState<number>(() => Date.now());
   useEffect(() => {
-    const timer = setInterval(() => setTicker((t) => t + 1), 1000);
+    const timer = setInterval(() => setCurrentTimeMs(Date.now()), 1000);
     return () => clearInterval(timer);
+  }, []);
+
+  // Helper: Live elapsed duration calculation for active tasks (from task.timers)
+  const calculateLiveTaskDuration = useCallback((task: any, nowMs: number): number => {
+    const timers = task.timers || [];
+    if (!timers || timers.length === 0) return task.totalDurationSeconds || 0;
+    const activeT = timers.find((t: any) => t.isActive ?? t.is_active);
+    if (!activeT) return task.totalDurationSeconds || 0;
+
+    const priorClosed = timers
+      .filter((t: any) => !(t.isActive ?? t.is_active))
+      .reduce((acc: number, t: any) => acc + (t.durationSeconds ?? t.duration_seconds ?? 0), 0);
+    const startedMs = new Date(activeT.startedAt || activeT.started_at).getTime();
+    const runningSec = Math.max(0, Math.floor((nowMs - startedMs) / 1000));
+    return priorClosed + runningSec;
+  }, []);
+
+  // Helper: Live elapsed calculation for employee currentTask
+  const calculateEmployeeLiveTaskElapsed = useCallback((currentTask: any, nowMs: number): number => {
+    if (!currentTask) return 0;
+    if (!currentTask.isActive || !currentTask.timerStartedAt) {
+      return currentTask.totalDurationSeconds ?? currentTask.elapsedSeconds ?? 0;
+    }
+    const prior = currentTask.priorClosedDurationSeconds ?? 0;
+    const startedMs = new Date(currentTask.timerStartedAt).getTime();
+    const runningSec = Math.max(0, Math.floor((nowMs - startedMs) / 1000));
+    return prior + runningSec;
   }, []);
 
   // Filtered employees for the main live monitor based on activeFilter
@@ -123,10 +150,6 @@ export default function AdminDashboard() {
   const handleOpenModal = (kpi: KPIFilterType) => {
     setModalKPI(kpi);
   };
-
-  if (isLoading) {
-    return <LoadingState message="Loading administrative intelligence overview..." />;
-  }
 
   if (error && !metrics) {
     return (
@@ -569,8 +592,10 @@ export default function AdminDashboard() {
                   No active tasks matching your filter.
                 </div>
               ) : (
-                filteredTasks.map((task) => {
-                  const hasTimer = Boolean(task.activeTimer?.isActive);
+                filteredTasks.map((task: any) => {
+                  const isRunning = Boolean(task.activeTimer?.isActive || (task.timers && task.timers.some((t: any) => t.isActive ?? t.is_active)));
+                  const liveDuration = calculateLiveTaskDuration(task, currentTimeMs);
+
                   return (
                     <div
                       key={task.id}
@@ -612,7 +637,7 @@ export default function AdminDashboard() {
                         >
                           {task.status}
                         </Badge>
-                        {hasTimer && (
+                        {isRunning && (
                           <div className="flex items-center gap-1.5 font-mono text-xs font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
                             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
                             <Clock className="w-3.5 h-3.5" />
@@ -625,7 +650,7 @@ export default function AdminDashboard() {
                       <div className="text-right min-w-[120px]">
                         <span className="text-[10px] uppercase font-bold text-neutral-400 block">Worked</span>
                         <span className="text-xs font-mono font-bold text-neutral-900">
-                          {formatSecondsToTime(task.totalDurationSeconds || (task.totalWorkMinutes ? task.totalWorkMinutes * 60 : 0))}
+                          {formatSecondsToTime(liveDuration)}
                         </span>
                       </div>
 
@@ -645,7 +670,23 @@ export default function AdminDashboard() {
           ) : (
             /* Employee Activity View */
             <div className="divide-y divide-neutral-100">
-              {filteredActivities.length === 0 ? (
+              {isLoading && activities.length === 0 ? (
+                <div className="space-y-4 p-5 animate-pulse">
+                  {[1, 2, 3, 4].map((i) => (
+                    <div key={i} className="flex items-center justify-between gap-4 py-2 border-b border-neutral-100">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-full bg-neutral-200"></div>
+                        <div className="space-y-1.5">
+                          <div className="h-4 bg-neutral-200 rounded w-32"></div>
+                          <div className="h-3 bg-neutral-100 rounded w-24"></div>
+                        </div>
+                      </div>
+                      <div className="h-6 bg-neutral-100 rounded w-28"></div>
+                      <div className="h-6 bg-neutral-100 rounded w-36"></div>
+                    </div>
+                  ))}
+                </div>
+              ) : filteredActivities.length === 0 ? (
                 <div className="p-8 text-center text-xs text-neutral-500">
                   No matching employees found for this status.
                 </div>
@@ -654,9 +695,7 @@ export default function AdminDashboard() {
                   const isCheckedIn = Boolean(act.isCheckedIn);
                   const isMarked = act.attendanceStatus !== 'NOT_MARKED' && act.attendanceStatus !== 'ABSENT';
                   const hasRunningTimer = Boolean(act.currentTask?.isActive);
-                  const currentElapsed = act.currentTask
-                    ? act.currentTask.elapsedSeconds + (hasRunningTimer ? ticker % 60 : 0)
-                    : 0;
+                  const currentElapsed = calculateEmployeeLiveTaskElapsed(act.currentTask, currentTimeMs);
 
                   return (
                     <div
@@ -811,33 +850,40 @@ export default function AdminDashboard() {
                     </TableCell>
                   </TableRow>
                 ) : (
-                  tasks.map((t) => (
-                    <TableRow key={t.id}>
-                      <TableCell className="font-bold text-neutral-900">{t.title}</TableCell>
-                      <TableCell>{t.project?.name || '—'}</TableCell>
-                      <TableCell>{t.employee?.displayName || t.employee?.employeeCode || 'Unassigned'}</TableCell>
-                      <TableCell>
-                        <Badge variant={t.status === 'IN_PROGRESS' ? 'default' : 'secondary'} className="text-[10px]">
-                          {t.status}
-                        </Badge>
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant="outline" className="text-[10px]">
-                          {t.priority}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="font-mono text-xs">
-                        {formatSecondsToTime(t.totalDurationSeconds || (t.totalWorkMinutes ? t.totalWorkMinutes * 60 : 0))}
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <Link href="/admin/tasks" onClick={() => setModalKPI(null)}>
-                          <Button size="sm" variant="outline" className="h-7 text-xs">
-                            View <ExternalLink className="w-3 h-3 ml-1" />
-                          </Button>
-                        </Link>
-                      </TableCell>
-                    </TableRow>
-                  ))
+                  tasks.map((t: any) => {
+                    const isRunning = Boolean(t.activeTimer?.isActive || (t.timers && t.timers.some((timer: any) => timer.isActive ?? timer.is_active)));
+                    const liveDuration = calculateLiveTaskDuration(t, currentTimeMs);
+
+                    return (
+                      <TableRow key={t.id}>
+                        <TableCell className="font-bold text-neutral-900">{t.title}</TableCell>
+                        <TableCell>{t.project?.name || '—'}</TableCell>
+                        <TableCell>{t.employee?.displayName || t.employee?.employeeCode || 'Unassigned'}</TableCell>
+                        <TableCell>
+                          <Badge variant={t.status === 'IN_PROGRESS' ? 'default' : 'secondary'} className="text-[10px]">
+                            {t.status}
+                          </Badge>
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="outline" className="text-[10px]">
+                            {t.priority}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="font-mono text-xs">
+                          <span className={isRunning ? 'text-emerald-700 font-bold' : ''}>
+                            {formatSecondsToTime(liveDuration)}
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Link href="/admin/tasks" onClick={() => setModalKPI(null)}>
+                            <Button size="sm" variant="outline" className="h-7 text-xs">
+                              View <ExternalLink className="w-3 h-3 ml-1" />
+                            </Button>
+                          </Link>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })
                 )}
               </TableBody>
             </Table>
@@ -913,8 +959,20 @@ export default function AdminDashboard() {
                           <div className="text-neutral-400">Not Checked In</div>
                         )}
                       </TableCell>
-                      <TableCell className="text-xs text-neutral-800 max-w-[160px] truncate">
-                        {act.currentTask?.title || <span className="text-neutral-400 italic">None</span>}
+                      <TableCell className="text-xs text-neutral-800 max-w-[200px]">
+                        {act.currentTask ? (
+                          <div>
+                            <span className="font-semibold truncate block">{act.currentTask.title}</span>
+                            {act.currentTask.isActive && (
+                              <span className="font-mono text-[10px] text-emerald-700 font-bold flex items-center gap-1 mt-0.5">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" />
+                                {formatSecondsToTime(calculateEmployeeLiveTaskElapsed(act.currentTask, currentTimeMs))}
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-neutral-400 italic">None</span>
+                        )}
                       </TableCell>
                       <TableCell className="text-right">
                         <Link href={`/admin/employees/${act.employeeId}`} onClick={() => setModalKPI(null)}>

@@ -2,8 +2,9 @@ import { prisma } from '../../plugins/prisma.js';
 import { DbService } from '../../services/db.service.js';
 import { DateTimeUtil } from '../../utils/datetime.js';
 import { AuditService } from '../../services/audit.service.js';
-import { CreateDailyReportInput } from '../../validation/index.js';
 import { AuthUser } from '../../types/index.js';
+import { RbacService } from '../../services/rbac.service.js';
+import { CreateDailyReportInput } from '../../validation/index.js';
 
 export class ReportService {
   public static async getTodayReport(employeeId: string) {
@@ -31,6 +32,7 @@ export class ReportService {
   public static async listReports(params: {
     employeeId?: string;
     reportDate?: string;
+    adminView?: boolean;
     user: AuthUser;
     page?: number;
     limit?: number;
@@ -38,19 +40,48 @@ export class ReportService {
     const page = Math.max(1, params.page || 1);
     const limit = Math.min(100, Math.max(1, params.limit || 30));
     const skip = (page - 1) * limit;
+    const isSuper = params.user.role === 'SUPER_ADMIN' || params.user.appRole === 'SUPER_ADMIN';
+
+    const where: any = {};
+
+    if (params.adminView) {
+      const hasReportAdminPerm =
+        isSuper ||
+        ((params.user.appRole === 'LIMITED_ADMIN' || params.user.role === 'ADMIN') &&
+          (RbacService.hasPermission(params.user, 'REPORTS_VIEW') ||
+            RbacService.hasPermission(params.user, 'REPORTS_APPROVE') ||
+            RbacService.hasPermission(params.user, 'REPORT_VIEW')));
+
+      if (!hasReportAdminPerm) {
+        const err: any = new Error('Forbidden: You do not have administrative permission to view team reports');
+        err.statusCode = 403;
+        throw err;
+      }
+
+      if (params.employeeId && params.employeeId !== 'undefined' && params.employeeId !== 'null' && params.employeeId.trim() !== '') {
+        if (!isSuper) {
+          const hasScope = await RbacService.hasScopeAccess(params.user, { employeeId: params.employeeId });
+          if (!hasScope) {
+            const err: any = new Error('Forbidden: Target employee is outside your permitted administrative scope');
+            err.statusCode = 403;
+            throw err;
+          }
+        }
+        where.employeeId = params.employeeId;
+      } else if (params.user.scope?.employees && Array.isArray(params.user.scope.employees) && params.user.scope.employees.length > 0) {
+        where.employeeId = { in: params.user.scope.employees };
+      }
+    } else {
+      // Personal Employee Context (Employee View: /reports)
+      where.employeeId = params.user.employeeId || '__NONE__';
+    }
+
+    if (params.reportDate) {
+      where.reportDate = new Date(params.reportDate);
+    }
 
     return DbService.query(
       async () => {
-        const where: any = {};
-        if (params.user.role === 'EMPLOYEE') {
-          where.employeeId = params.user.employeeId;
-        } else if (params.employeeId) {
-          where.employeeId = params.employeeId;
-        }
-        if (params.reportDate) {
-          where.reportDate = new Date(params.reportDate);
-        }
-
         const [items, total] = await Promise.all([
           prisma.dailyWorkReport.findMany({
             where,
@@ -72,10 +103,12 @@ export class ReportService {
       },
       async () => {
         let path = `/daily_work_reports?select=*,employee:employees(id,display_name,employee_code,profile_photo_url),reviewer:users(id,email)&order=report_date.desc&limit=${limit}&offset=${skip}`;
-        if (params.user.role === 'EMPLOYEE' && params.user.employeeId) {
-          path += `&employee_id=eq.${params.user.employeeId}`;
-        } else if (params.employeeId) {
-          path += `&employee_id=eq.${params.employeeId}`;
+        if (where.employeeId) {
+          if (typeof where.employeeId === 'object' && where.employeeId.in) {
+            path += `&employee_id=in.(${where.employeeId.in.join(',')})`;
+          } else {
+            path += `&employee_id=eq.${where.employeeId}`;
+          }
         }
         if (params.reportDate) {
           path += `&report_date=eq.${params.reportDate}`;

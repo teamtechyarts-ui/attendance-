@@ -123,8 +123,12 @@ export default function ReportsPage() {
           <CardTitle className="text-sm">Previous Work Reports</CardTitle>
         </CardHeader>
         <CardContent>
-          {isLoading ? (
-            <LoadingState message="Loading reports..." />
+          {isLoading && reports.length === 0 ? (
+            <div className="space-y-3 p-4 animate-pulse">
+              <div className="h-8 bg-neutral-100 rounded w-full"></div>
+              <div className="h-8 bg-neutral-100 rounded w-full"></div>
+              <div className="h-8 bg-neutral-100 rounded w-full"></div>
+            </div>
           ) : reports.length === 0 ? (
             <EmptyState icon={FileText} title="No reports yet" description="Your daily work reports will be listed here." />
           ) : (

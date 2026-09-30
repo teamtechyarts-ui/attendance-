@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { DateTimeUtil } from '../utils/datetime.js';
 
 // Auth Schemas
 export const loginSchema = z.object({
@@ -91,25 +92,58 @@ export const checkOutSchema = z.object({
   notes: z.string().optional().nullable(),
 });
 
+export const attendanceHistoryQuerySchema = z.object({
+  employeeId: z.string().optional().nullable(),
+  date: z.string().optional().nullable().refine((val) => !val || DateTimeUtil.isValidDateString(val), {
+    message: 'Invalid date. Must be a valid calendar date in YYYY-MM-DD format',
+  }),
+  month: z.coerce.number().int().min(1, 'Month must be between 1 and 12').max(12, 'Month must be between 1 and 12').optional().nullable(),
+  year: z.coerce.number().int().min(1900, 'Invalid year').max(2100, 'Invalid year').optional().nullable(),
+  status: z.string().optional().nullable(),
+});
+
 // Project Schemas
 export const projectMemberItemSchema = z.object({
   employeeId: z.string().uuid('Invalid employee ID'),
   projectRole: z.string().default('CONTRIBUTOR'),
 });
 
-export const createProjectSchema = z.object({
+const isDueAfterStart = (start?: string | null, due?: string | null) => {
+  if (!start || !due) return true;
+  const startDate = new Date(start);
+  const dueDate = new Date(due);
+  if (isNaN(startDate.getTime()) || isNaN(dueDate.getTime())) return true;
+  return dueDate.getTime() >= startDate.getTime();
+};
+
+export const createProjectBaseSchema = z.object({
   name: z.string().min(1, 'Project name is required').max(200),
   description: z.string().optional().nullable(),
   status: z.enum(['PLANNING', 'IN_PROGRESS', 'COMPLETED', 'ON_HOLD']).default('IN_PROGRESS'),
   employeeId: z.string().uuid().optional().nullable(),
   startDate: z.string().optional().nullable(),
+  assignedDate: z.string().optional().nullable(),
   dueDate: z.string().optional().nullable(),
   members: z.array(projectMemberItemSchema).optional(),
 });
 
-export const updateProjectSchema = createProjectSchema.partial().extend({
+export const createProjectSchema = createProjectBaseSchema.refine(
+  (data) => isDueAfterStart(data.assignedDate || data.startDate, data.dueDate),
+  {
+    message: 'Due date must be greater than or equal to assigned date',
+    path: ['dueDate'],
+  }
+);
+
+export const updateProjectSchema = createProjectBaseSchema.partial().extend({
   completedAt: z.string().optional().nullable(),
-});
+}).refine(
+  (data) => isDueAfterStart(data.assignedDate || data.startDate, data.dueDate),
+  {
+    message: 'Due date must be greater than or equal to assigned date',
+    path: ['dueDate'],
+  }
+);
 
 export const addProjectMemberSchema = z.object({
   employeeId: z.string().uuid('Invalid employee ID'),
@@ -121,13 +155,14 @@ export const updateProjectMemberSchema = z.object({
 });
 
 // Task Schemas
-export const createTaskSchema = z.object({
+export const createTaskBaseSchema = z.object({
   title: z.string().min(1, 'Task title is required').max(200),
   description: z.string().optional().nullable(),
   projectId: z.string().optional().nullable(),
   employeeId: z.string().uuid().optional(),
   priority: z.enum(['LOW', 'MEDIUM', 'HIGH', 'URGENT']).default('MEDIUM'),
   startDate: z.string().optional().nullable(),
+  assignedDate: z.string().optional().nullable(),
   dueDate: z.string().optional().nullable(),
   estimatedMinutes: z.number().int().positive().optional().nullable(),
   reminderEnabled: z.boolean().default(false).optional(),
@@ -135,10 +170,24 @@ export const createTaskSchema = z.object({
   mentionedEmployeeIds: z.array(z.string().uuid()).optional(),
 });
 
-export const updateTaskSchema = createTaskSchema.partial().extend({
+export const createTaskSchema = createTaskBaseSchema.refine(
+  (data) => isDueAfterStart(data.assignedDate || data.startDate, data.dueDate),
+  {
+    message: 'Due date must be greater than or equal to assigned date',
+    path: ['dueDate'],
+  }
+);
+
+export const updateTaskSchema = createTaskBaseSchema.partial().extend({
   status: z.enum(['TODO', 'IN_PROGRESS', 'PAUSED', 'COMPLETED', 'CANCELLED', 'OVERDUE']).optional(),
   progressPercentage: z.number().min(0).max(100).optional(),
-});
+}).refine(
+  (data) => isDueAfterStart(data.assignedDate || data.startDate, data.dueDate),
+  {
+    message: 'Due date must be greater than or equal to assigned date',
+    path: ['dueDate'],
+  }
+);
 
 // Task Comment & Mention Schemas
 export const createTaskCommentSchema = z.object({
@@ -158,11 +207,46 @@ export const startTimerSchema = z.object({
 });
 
 // Leave Schemas
+export const createLeaveTypeSchema = z.object({
+  name: z.string().min(1, 'Leave type name is required').max(100),
+  description: z.string().optional().nullable(),
+  defaultDaysPerYear: z.number().min(0).default(12),
+  isPaid: z.boolean().default(true),
+});
+
+export const updateLeaveTypeSchema = createLeaveTypeSchema.partial();
+
+export const updateLeavePolicySchema = z.object({
+  policyCycle: z.enum(['MONTHLY', 'ANNUAL']).default('MONTHLY'),
+  monthlyAllocation: z.number().min(0).default(2),
+  annualAllocation: z.number().min(0).default(24),
+  carryForward: z.boolean().default(false),
+  maxCarryForward: z.number().min(0).default(0),
+  requiresApproval: z.boolean().default(true),
+  minNoticeDays: z.number().min(0).default(0),
+  isActive: z.boolean().default(true),
+  description: z.string().optional().nullable(),
+});
+
+export const createLeaveAllocationSchema = z.object({
+  leaveTypeId: z.string().uuid('Invalid leave type ID'),
+  year: z.number().int().min(2020).max(2100),
+  month: z.number().int().min(1).max(12).optional().nullable(),
+  targetType: z.enum(['ALL', 'EMPLOYEE', 'EMPLOYEES', 'DEPARTMENT', 'DESIGNATION']).default('ALL'),
+  targetEmployeeIds: z.array(z.string().uuid()).optional(),
+  targetDepartmentId: z.string().uuid().optional().nullable(),
+  targetDesignationId: z.string().uuid().optional().nullable(),
+  allocatedDays: z.number().min(0, 'Allocated days cannot be negative'),
+  notes: z.string().optional().nullable(),
+});
+
+export const updateLeaveAllocationSchema = createLeaveAllocationSchema.partial();
+
 export const createLeaveRequestSchema = z.object({
   leaveTypeId: z.string().uuid('Invalid leave type'),
   startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be YYYY-MM-DD'),
   endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be YYYY-MM-DD'),
-  totalDays: z.number().positive('Total days must be greater than 0'),
+  totalDays: z.number().positive('Total days must be greater than 0').optional(),
   reason: z.string().min(5, 'Reason must be at least 5 characters'),
 });
 
@@ -298,3 +382,4 @@ export type CreateWorkScheduleInput = z.infer<typeof createWorkScheduleSchema>;
 export type UpdateWorkScheduleInput = z.infer<typeof updateWorkScheduleSchema>;
 export type CreateCalendarEventInput = z.infer<typeof createCalendarEventSchema>;
 export type UpdateCalendarEventInput = z.infer<typeof updateCalendarEventSchema>;
+export type AttendanceHistoryQueryInput = z.infer<typeof attendanceHistoryQuerySchema>;

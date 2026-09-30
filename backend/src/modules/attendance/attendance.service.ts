@@ -5,6 +5,9 @@ import { WorkdayService } from '../../services/workday.service.js';
 import { AuditService } from '../../services/audit.service.js';
 import { CheckInInput, CheckOutInput } from '../../validation/index.js';
 import { LiveEmployeeActivity, AdminDashboardMetrics, AttendanceStatus, WorkMode } from '../../types/index.js';
+import { TaskService } from '../tasks/task.service.js';
+import { NotificationService } from '../notifications/notification.service.js';
+import { invalidateAuthSession, invalidateUserAuthSessions } from '../../middleware/auth.js';
 
 export class AttendanceService {
   /**
@@ -63,20 +66,14 @@ export class AttendanceService {
     // Workday evaluation
     const workday = await WorkdayService.evaluateDayForEmployee(employeeId, todayStr);
 
-    // Determine status (LATE or PRESENT)
-    let status: AttendanceStatus = 'PRESENT';
-    if (workday.schedule?.workStartTime) {
-      const scheduleMinutes = DateTimeUtil.timeToMinutes(workday.schedule.workStartTime);
-      const currentHours = now.getHours();
-      const currentMinutes = now.getMinutes();
-      const nowMinutes = currentHours * 60 + currentMinutes;
-      // If checked in > 15 minutes after schedule start time
-      if (nowMinutes > scheduleMinutes + 15) {
-        status = 'LATE';
-      }
-    }
+    // Determine status (LATE or PRESENT) authoritatively using work schedule and 15-minute grace threshold
+    const status: AttendanceStatus = DateTimeUtil.calculateAttendanceStatus(
+      now,
+      workday.schedule,
+      15
+    );
 
-    return DbService.query(
+    const result = await DbService.query(
       async () => {
         return await prisma.$transaction(async (tx) => {
           // Check if already checked in
@@ -160,6 +157,18 @@ export class AttendanceService {
             ipAddress: clientInfo.ipAddress,
             userAgent: clientInfo.userAgent,
           });
+
+          // Informational in-app notification
+          NotificationService.createNotification({
+            userId,
+            type: 'ATTENDANCE_MARKED',
+            title: 'Attendance Marked',
+            message: `You checked in today at ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (${input.workMode}, ${status}).`,
+            actionUrl: '/attendance',
+            entityType: 'attendance',
+            entityId: attendance.id,
+            actorId: userId,
+          }).catch(() => {});
 
           return attendance;
         });
@@ -251,6 +260,9 @@ export class AttendanceService {
         return attendance;
       }
     );
+
+    invalidateAuthSession(sessionId);
+    return result;
   }
 
   /**
@@ -265,7 +277,7 @@ export class AttendanceService {
     const todayStr = DateTimeUtil.getTodayDateString();
     const now = new Date();
 
-    return DbService.query(
+    const result = await DbService.query(
       async () => {
         return await prisma.$transaction(async (tx) => {
           const attendance = await tx.attendance.findUnique({
@@ -531,6 +543,9 @@ export class AttendanceService {
         };
       }
     );
+
+    invalidateUserAuthSessions(userId);
+    return result;
   }
 
   /**
@@ -544,7 +559,10 @@ export class AttendanceService {
       async () => {
         const [employees, leaves] = await Promise.all([
           prisma.employee.findMany({
-            where: { employmentStatus: 'ACTIVE' },
+            where: {
+              employmentStatus: 'ACTIVE',
+              NOT: { user: { role: 'SUPER_ADMIN' } },
+            },
             include: {
               department: true,
               designation: true,
@@ -556,10 +574,7 @@ export class AttendanceService {
                 where: { status: { in: ['IN_PROGRESS', 'TODO', 'PAUSED'] } },
                 include: {
                   project: { select: { id: true, name: true } },
-                  timers: {
-                    where: { isActive: true },
-                    take: 1,
-                  },
+                  timers: true,
                 },
                 orderBy: { updatedAt: 'desc' },
               },
@@ -603,13 +618,16 @@ export class AttendanceService {
           }
 
           // Find current active task & timer
-          const runningTask = emp.tasks.find((t) => t.timers && t.timers.length > 0 && t.timers[0].isActive) || emp.tasks[0];
-          const activeTimer = runningTask?.timers?.[0];
+          const runningTask = emp.tasks.find((t) => t.timers && t.timers.some((timer) => timer.isActive)) || emp.tasks[0];
+          const activeTimer = runningTask?.timers?.find((t) => t.isActive);
 
+          let priorClosedDurationSeconds = 0;
           let elapsedSeconds = 0;
-          if (activeTimer) {
-            const startedAt = new Date(activeTimer.startedAt);
-            elapsedSeconds = (activeTimer.durationSeconds || 0) + DateTimeUtil.diffSeconds(startedAt, new Date());
+          if (runningTask && runningTask.timers && runningTask.timers.length > 0) {
+            priorClosedDurationSeconds = runningTask.timers
+              .filter((t) => !t.isActive)
+              .reduce((acc, t) => acc + (t.durationSeconds || 0), 0);
+            elapsedSeconds = TaskService.calculateTaskWorkedSeconds(runningTask.timers, new Date());
           }
 
           return {
@@ -641,6 +659,8 @@ export class AttendanceService {
                   priority: runningTask.priority,
                   status: runningTask.status,
                   timerStartedAt: activeTimer ? activeTimer.startedAt.toISOString() : null,
+                  priorClosedDurationSeconds,
+                  totalDurationSeconds: elapsedSeconds,
                   elapsedSeconds,
                   isActive: Boolean(activeTimer?.isActive),
                   projectName: runningTask.project?.name || null,
@@ -652,9 +672,9 @@ export class AttendanceService {
       },
       async () => {
         // REST Fallback
-        const [employees, attendances, leaves, tasks] = await Promise.all([
+        const [rawEmployees, attendances, leaves, tasks] = await Promise.all([
           DbService.restRequest<any[]>(
-            `/employees?employment_status=eq.ACTIVE&select=*,department:departments(*),designation:designations(*)`
+            `/employees?employment_status=eq.ACTIVE&select=*,department:departments(*),designation:designations(*),user:users(role)`
           ),
           DbService.restRequest<any[]>(
             `/attendance?attendance_date=eq.${todayStr}&select=*`
@@ -666,6 +686,8 @@ export class AttendanceService {
             `/tasks?status=in.(TODO,IN_PROGRESS,PAUSED)&select=*,timers:task_timers(*)`
           ).catch(() => []),
         ]);
+
+        const employees = (rawEmployees || []).filter((e) => e.user?.role !== 'SUPER_ADMIN');
 
         const attByEmpId = new Map<string, any>();
         for (const a of attendances || []) {
@@ -692,13 +714,15 @@ export class AttendanceService {
           const runningTask = empTasks.find((t: any) => t.timers?.some((timer: any) => timer.isActive || timer.is_active)) || empTasks[0];
           const activeTimer = runningTask?.timers?.find((t: any) => t.isActive || t.is_active);
 
+          let priorClosedDurationSeconds = 0;
           let elapsedSeconds = 0;
-          if (activeTimer) {
-            const startedAtStr = activeTimer.startedAt || activeTimer.started_at;
-            const dur = activeTimer.durationSeconds ?? activeTimer.duration_seconds ?? 0;
-            if (startedAtStr) {
-              elapsedSeconds = dur + DateTimeUtil.diffSeconds(startedAtStr, new Date());
-            }
+          if (runningTask && runningTask.timers && runningTask.timers.length > 0) {
+            priorClosedDurationSeconds = (runningTask.timers || [])
+              .filter((t: any) => !(t.isActive || t.is_active))
+              .reduce((acc: number, t: any) => acc + (t.durationSeconds ?? t.duration_seconds ?? 0), 0);
+            elapsedSeconds = TaskService.calculateTaskWorkedSeconds(runningTask.timers, new Date());
+          } else if (runningTask) {
+            elapsedSeconds = runningTask.totalDurationSeconds ?? runningTask.total_duration_seconds ?? 0;
           }
 
           const firstName = emp.firstName || emp.first_name || '';
@@ -748,6 +772,8 @@ export class AttendanceService {
                   priority: runningTask.priority,
                   status: runningTask.status,
                   timerStartedAt: activeTimer?.startedAt || activeTimer?.started_at || null,
+                  priorClosedDurationSeconds,
+                  totalDurationSeconds: elapsedSeconds,
                   elapsedSeconds,
                   isActive: Boolean(activeTimer?.isActive ?? activeTimer?.is_active ?? false),
                   projectName: runningTask.project?.name || null,
@@ -779,7 +805,10 @@ export class AttendanceService {
           submittedReports,
         ] = await Promise.all([
           prisma.employee.findMany({
-            where: { employmentStatus: 'ACTIVE' },
+            where: {
+              employmentStatus: 'ACTIVE',
+              NOT: { user: { role: 'SUPER_ADMIN' } },
+            },
             select: { id: true },
           }),
           prisma.attendance.findMany({
@@ -847,7 +876,7 @@ export class AttendanceService {
       },
       async () => {
         const [employees, attendances, leaves, tasks, completedTasks, pendingLeaves, submittedReports] = await Promise.all([
-          DbService.restRequest<any[]>('/employees?employment_status=eq.ACTIVE&select=id'),
+          DbService.restRequest<any[]>('/employees?employment_status=eq.ACTIVE&select=id,user:users(role)'),
           DbService.restRequest<any[]>(`/attendance?attendance_date=eq.${todayStr}&select=*`),
           DbService.restRequest<any[]>(`/leave_requests?status=eq.APPROVED&start_date=lte.${todayStr}&end_date=gte.${todayStr}&select=employee_id`),
           DbService.restRequest<any[]>('/tasks?status=in.(TODO,IN_PROGRESS,PAUSED)&select=id'),
@@ -856,7 +885,7 @@ export class AttendanceService {
           DbService.restRequest<any[]>(`/daily_work_reports?report_date=eq.${todayStr}&select=id`),
         ]);
 
-        const activeEmployees = employees || [];
+        const activeEmployees = (employees || []).filter((e: any) => e.user?.role !== 'SUPER_ADMIN');
         const totalEmployees = activeEmployees.length;
         const activeEmpIds = new Set(activeEmployees.map((e: any) => e.id));
 
@@ -918,33 +947,522 @@ export class AttendanceService {
   }
 
   /**
-   * Get attendance history for an employee
+   * Get attendance history (for a specific employee or all employees)
+   * Computes the complete authoritative attendance calendar including:
+   * - PRESENT, LATE, HALF_DAY (from attendance logs)
+   * - LEAVE (from approved leave requests)
+   * - HOLIDAY (from holiday calendar)
+   * - OFF (from scheduled non-working days / weekends)
+   * - ABSENT (scheduled working days with no attendance/leave)
+   * Returns records and comprehensive monthly summary metrics.
    */
-  public static async getHistory(employeeId: string, year?: number, month?: number) {
-    const now = new Date();
-    const currentYear = year || now.getFullYear();
-    const currentMonth = month || now.getMonth() + 1;
+  public static async getHistory(
+    employeeIdOrOptions?: string | string[] | null | {
+      employeeId?: string | string[] | null;
+      date?: string;
+      year?: number;
+      month?: number;
+      status?: string;
+      adminView?: boolean;
+    },
+    yearArg?: number,
+    monthArg?: number,
+    dateArg?: string
+  ) {
+    let employeeId: string | string[] | null | undefined;
+    let date: string | undefined;
+    let year: number | undefined;
+    let month: number | undefined;
+    let statusFilter: string | undefined;
+    let adminView: boolean | undefined;
 
-    const { startDate, endDate, startStr, endStr } = DateTimeUtil.getMonthDateRange(currentYear, currentMonth);
+    if (employeeIdOrOptions && typeof employeeIdOrOptions === 'object' && !Array.isArray(employeeIdOrOptions)) {
+      employeeId = employeeIdOrOptions.employeeId;
+      date = employeeIdOrOptions.date;
+      year = employeeIdOrOptions.year;
+      month = employeeIdOrOptions.month;
+      statusFilter = employeeIdOrOptions.status;
+      adminView = employeeIdOrOptions.adminView;
+    } else {
+      employeeId = employeeIdOrOptions;
+      year = yearArg;
+      month = monthArg;
+      date = dateArg;
+    }
+
+    const todayStr = DateTimeUtil.getTodayDateString();
+
+    // Determine Date Range
+    let startStr: string;
+    let endStr: string;
+    let isSpecificDate = false;
+
+    if (date && DateTimeUtil.isValidDateString(date)) {
+      startStr = date;
+      endStr = date;
+      isSpecificDate = true;
+    } else if (year && month) {
+      const range = DateTimeUtil.getMonthDateRange(year, month);
+      startStr = range.startStr;
+      endStr = range.endStr;
+    } else if (year) {
+      const range = DateTimeUtil.getYearDateRange(year);
+      startStr = range.startStr;
+      endStr = range.endStr;
+    } else {
+      // Default: Current Month
+      const [yStr, mStr] = todayStr.split('-');
+      const currYear = parseInt(yStr, 10);
+      const currMonth = parseInt(mStr, 10);
+      const range = DateTimeUtil.getMonthDateRange(currYear, currMonth);
+      startStr = range.startStr;
+      endStr = range.endStr;
+    }
+
+    const startObj = new Date(startStr);
+    const endObj = new Date(endStr);
 
     return DbService.query(
       async () => {
-        return await prisma.attendance.findMany({
-          where: {
-            employeeId,
-            attendanceDate: {
-              gte: startDate,
-              lte: endDate,
+        // 1. Resolve Target Employees
+        let targetEmployees: {
+          id: string;
+          displayName: string;
+          firstName: string;
+          lastName: string;
+          employeeCode: string;
+        }[] = [];
+
+        if (employeeId) {
+          const empWhere = Array.isArray(employeeId) ? { in: employeeId } : employeeId;
+          targetEmployees = await prisma.employee.findMany({
+            where: { id: empWhere },
+            select: { id: true, displayName: true, firstName: true, lastName: true, employeeCode: true },
+          });
+        } else if (adminView) {
+          targetEmployees = await prisma.employee.findMany({
+            where: {
+              employmentStatus: 'ACTIVE',
+              NOT: { user: { role: 'SUPER_ADMIN' } },
             },
-          },
-          orderBy: { attendanceDate: 'desc' },
+            select: { id: true, displayName: true, firstName: true, lastName: true, employeeCode: true },
+            orderBy: { displayName: 'asc' },
+          });
+        } else {
+          targetEmployees = [];
+        }
+
+        if (targetEmployees.length === 0) {
+          return {
+            records: [],
+            summary: {
+              totalDays: 0,
+              workingDays: 0,
+              present: 0,
+              late: 0,
+              halfDay: 0,
+              absent: 0,
+              leave: 0,
+              holidays: 0,
+              offDays: 0,
+            },
+          };
+        }
+
+        const targetEmpIds = targetEmployees.map((e) => e.id);
+
+        // 2. Concurrently fetch attendance records, approved leaves, and workday evaluations
+        const [attendances, approvedLeaves, evaluations] = await Promise.all([
+          prisma.attendance.findMany({
+            where: {
+              employeeId: { in: targetEmpIds },
+              attendanceDate: { gte: startObj, lte: endObj },
+            },
+            include: {
+              employee: {
+                select: { id: true, displayName: true, firstName: true, lastName: true, employeeCode: true },
+              },
+            },
+            orderBy: { attendanceDate: 'desc' },
+          }),
+          prisma.leaveRequest.findMany({
+            where: {
+              employeeId: { in: targetEmpIds },
+              status: 'APPROVED',
+              startDate: { lte: endObj },
+              endDate: { gte: startObj },
+            },
+            include: { leaveType: { select: { id: true, name: true } } },
+          }),
+          WorkdayService.evaluateDateRange(targetEmpIds, startStr, endStr),
+        ]);
+
+        // Build Index Maps
+        // Attendance Map: empId -> dateStr -> record
+        const attMap = new Map<string, Map<string, any>>();
+        for (const a of attendances) {
+          if (!attMap.has(a.employeeId)) attMap.set(a.employeeId, new Map());
+          const rawDate: any = a.attendanceDate;
+          const dStr = typeof rawDate === 'string' ? rawDate.slice(0, 10) : DateTimeUtil.formatDateString(rawDate);
+          if (dStr) {
+            attMap.get(a.employeeId)!.set(dStr, a);
+          }
+
+        }
+
+        // Leave Map: empId -> list of approved requests
+        const leaveMap = new Map<string, any[]>();
+        for (const l of approvedLeaves) {
+          if (!leaveMap.has(l.employeeId)) leaveMap.set(l.employeeId, []);
+          leaveMap.get(l.employeeId)!.push(l);
+        }
+
+        // 3. Build Calendar Dates List
+        const dateStrings: string[] = [];
+        let curr = new Date(startObj);
+        while (curr <= endObj) {
+          dateStrings.push(DateTimeUtil.formatDateString(curr));
+          curr = new Date(curr.getTime() + 86400000);
+        }
+
+        const allRecords: any[] = [];
+        let summaryWorkingDays = 0;
+        let summaryPresent = 0;
+        let summaryLate = 0;
+        let summaryHalfDay = 0;
+        let summaryAbsent = 0;
+        let summaryLeave = 0;
+        let summaryHolidays = 0;
+        let summaryOffDays = 0;
+
+        for (const emp of targetEmployees) {
+          const empDays = evaluations.get(emp.id) || new Map<string, any>();
+          const empAtts = attMap.get(emp.id) || new Map<string, any>();
+          const empLeaves = leaveMap.get(emp.id) || [];
+
+          for (const dateStr of dateStrings) {
+            const evalResult = empDays.get(dateStr) || { isWorkingDay: true, isHoliday: false, isWeekend: false };
+            const att = empAtts.get(dateStr);
+
+            // Check if date is covered by approved leave
+            const matchingLeave = empLeaves.find((l) => {
+              const rawStart = l.startDate || l.start_date;
+              const rawEnd = l.endDate || l.end_date;
+              const lStart = typeof rawStart === 'string' ? rawStart.slice(0, 10) : DateTimeUtil.formatDateString(rawStart);
+              const lEnd = typeof rawEnd === 'string' ? rawEnd.slice(0, 10) : DateTimeUtil.formatDateString(rawEnd);
+              return Boolean(lStart && lEnd && dateStr >= lStart && dateStr <= lEnd);
+            });
+
+
+            // Authoritative Status Resolution
+            let status: AttendanceStatus | 'LEAVE' | 'OFF' | 'UPCOMING';
+            const isFuture = dateStr > todayStr;
+
+            if (isFuture) {
+              if (evalResult.isHoliday) {
+                status = 'HOLIDAY';
+              } else if (!evalResult.isWorkingDay) {
+                status = 'OFF';
+              } else if (matchingLeave) {
+                status = 'LEAVE';
+              } else {
+                status = 'UPCOMING';
+              }
+            } else {
+              // Today or Past Date
+              if (evalResult.isHoliday) {
+                status = att?.checkInAt ? (att.status as AttendanceStatus) : 'HOLIDAY';
+              } else if (!evalResult.isWorkingDay) {
+                status = att?.checkInAt ? (att.status as AttendanceStatus) : 'OFF';
+              } else if (matchingLeave) {
+                status = 'LEAVE';
+              } else if (att?.checkInAt) {
+                status = att.status as AttendanceStatus;
+              } else {
+                status = 'ABSENT';
+              }
+            }
+
+            // Reconcile Summary Totals (only for single employee or aggregate)
+            if (evalResult.isHoliday) {
+              summaryHolidays++;
+            } else if (!evalResult.isWorkingDay) {
+              summaryOffDays++;
+            } else {
+              summaryWorkingDays++;
+            }
+
+            if (status === 'PRESENT') {
+              summaryPresent++;
+            } else if (status === 'LATE') {
+              summaryLate++;
+            } else if (status === 'HALF_DAY') {
+              summaryHalfDay++;
+            } else if (status === 'ABSENT') {
+              summaryAbsent++;
+            } else if (status === 'LEAVE') {
+              summaryLeave++;
+            }
+
+
+            const record = {
+              id: att?.id || `calendar-${emp.id}-${dateStr}`,
+              employeeId: emp.id,
+              employee: {
+                id: emp.id,
+                displayName: emp.displayName,
+                firstName: emp.firstName,
+                lastName: emp.lastName,
+                employeeCode: emp.employeeCode,
+              },
+              attendanceDate: dateStr,
+              status,
+              workMode: att?.workMode || (status === 'OFF' || status === 'HOLIDAY' ? 'OFFICE' : 'OFFICE'),
+              verificationMethod: att?.verificationMethod || 'MANUAL',
+              checkInAt: att?.checkInAt ? new Date(att.checkInAt).toISOString() : null,
+              checkOutAt: att?.checkOutAt ? new Date(att.checkOutAt).toISOString() : null,
+              totalWorkMinutes: att?.totalWorkMinutes || null,
+              isWorkingDay: evalResult.isWorkingDay,
+              holidayName: evalResult.holidayName || null,
+              leaveType: matchingLeave?.leaveType?.name || null,
+              leaveReason: matchingLeave?.reason || null,
+              notes: att?.notes || null,
+              isDerived: !att,
+            };
+
+            allRecords.push(record);
+          }
+        }
+
+        // Filter by status if specified
+        let filteredRecords = allRecords;
+        if (statusFilter && statusFilter.toUpperCase() !== 'ALL') {
+          const normFilter = statusFilter.toUpperCase();
+          filteredRecords = allRecords.filter((r) => {
+            if (normFilter === 'LEAVE') return r.status === 'LEAVE' || r.status === 'ON_LEAVE';
+            if (normFilter === 'OFF') return r.status === 'OFF' || r.status === 'WEEKEND';
+            return r.status === normFilter;
+          });
+        }
+
+        // Sort descending by attendance date, then employee name
+        filteredRecords.sort((a, b) => {
+          if (b.attendanceDate !== a.attendanceDate) {
+            return b.attendanceDate.localeCompare(a.attendanceDate);
+          }
+          return (a.employee?.displayName || '').localeCompare(b.employee?.displayName || '');
         });
+
+        return {
+          records: filteredRecords,
+          summary: {
+            totalDays: dateStrings.length * targetEmployees.length,
+            workingDays: summaryWorkingDays,
+            present: summaryPresent,
+            late: summaryLate,
+            halfDay: summaryHalfDay,
+            absent: summaryAbsent,
+            leave: summaryLeave,
+            holidays: summaryHolidays,
+            offDays: summaryOffDays,
+          },
+        };
       },
       async () => {
-        return await DbService.restRequest<any[]>(
-          `/attendance?employee_id=eq.${employeeId}&attendance_date=gte.${startStr}&attendance_date=lte.${endStr}&order=attendance_date.desc`
+        // Supabase REST Fallback
+        let empQueryFilter = '';
+        let fkFilter = '';
+        if (employeeId) {
+          if (Array.isArray(employeeId)) {
+            empQueryFilter = `id=in.(${employeeId.join(',')})&`;
+            fkFilter = `employee_id=in.(${employeeId.join(',')})&`;
+          } else {
+            empQueryFilter = `id=eq.${employeeId}&`;
+            fkFilter = `employee_id=eq.${employeeId}&`;
+          }
+        }
+
+        const [employees, rawAttendances, rawLeaves] = await Promise.all([
+          employeeId
+            ? DbService.restRequest<any[]>(`/employees?${empQueryFilter}select=id,display_name,first_name,last_name,employee_code`)
+            : DbService.restRequest<any[]>('/employees?employment_status=eq.ACTIVE&select=id,display_name,first_name,last_name,employee_code,user:users(role)'),
+          DbService.restRequest<any[]>(
+            `/attendance?${fkFilter}attendance_date=gte.${startStr}&attendance_date=lte.${endStr}&select=*,employee:employees(id,display_name,first_name,last_name,employee_code)&order=attendance_date.desc`
+          ),
+          DbService.restRequest<any[]>(
+            `/leave_requests?${fkFilter}status=eq.APPROVED&start_date=lte.${endStr}&end_date=gte.${startStr}&select=*,leave_type:leave_types(id,name)`
+          ),
+        ]);
+
+        const activeEmployees = (employees || []).filter((e: any) => employeeId || e.user?.role !== 'SUPER_ADMIN');
+        const targetEmpIds = activeEmployees.map((e: any) => e.id);
+
+        const evaluations = await WorkdayService.evaluateDateRange(
+          targetEmpIds,
+          startStr,
+          endStr
         );
+
+
+        const attMap = new Map<string, Map<string, any>>();
+        for (const a of rawAttendances || []) {
+          const empId = a.employeeId || a.employee_id;
+          if (!empId) continue;
+          if (!attMap.has(empId)) attMap.set(empId, new Map());
+          const rawDate = a.attendanceDate || a.attendance_date;
+          const dStr = typeof rawDate === 'string' ? rawDate.slice(0, 10) : DateTimeUtil.formatDateString(rawDate);
+          if (dStr) {
+            attMap.get(empId)!.set(dStr, DbService.toCamelCase(a));
+          }
+        }
+
+        const leaveMap = new Map<string, any[]>();
+        for (const l of rawLeaves || []) {
+          const empId = l.employeeId || l.employee_id;
+          if (!empId) continue;
+          if (!leaveMap.has(empId)) leaveMap.set(empId, []);
+          leaveMap.get(empId)!.push(DbService.toCamelCase(l));
+        }
+
+        const dateStrings: string[] = [];
+        let curr = new Date(startObj);
+        while (curr <= endObj) {
+          dateStrings.push(DateTimeUtil.formatDateString(curr));
+          curr = new Date(curr.getTime() + 86400000);
+        }
+
+        const allRecords: any[] = [];
+        let summaryWorkingDays = 0;
+        let summaryPresent = 0;
+        let summaryLate = 0;
+        let summaryHalfDay = 0;
+        let summaryAbsent = 0;
+        let summaryLeave = 0;
+        let summaryHolidays = 0;
+        let summaryOffDays = 0;
+
+        for (const emp of activeEmployees) {
+          const empDays = evaluations.get(emp.id) || new Map<string, any>();
+          const empAtts = attMap.get(emp.id) || new Map<string, any>();
+          const empLeaves = leaveMap.get(emp.id) || [];
+
+          for (const dateStr of dateStrings) {
+            const evalResult = empDays.get(dateStr) || { isWorkingDay: true, isHoliday: false, isWeekend: false };
+            const att = empAtts.get(dateStr);
+
+            const matchingLeave = empLeaves.find((l) => {
+              const rawStart = l.startDate || l.start_date;
+              const rawEnd = l.endDate || l.end_date;
+              const lStart = typeof rawStart === 'string' ? rawStart.slice(0, 10) : DateTimeUtil.formatDateString(rawStart);
+              const lEnd = typeof rawEnd === 'string' ? rawEnd.slice(0, 10) : DateTimeUtil.formatDateString(rawEnd);
+              return Boolean(lStart && lEnd && dateStr >= lStart && dateStr <= lEnd);
+            });
+
+
+            let status: AttendanceStatus | 'LEAVE' | 'OFF' | 'UPCOMING';
+            const isFuture = dateStr > todayStr;
+
+            if (isFuture) {
+              if (evalResult.isHoliday) status = 'HOLIDAY';
+              else if (!evalResult.isWorkingDay) status = 'OFF';
+              else if (matchingLeave) status = 'LEAVE';
+              else status = 'UPCOMING';
+            } else {
+              if (evalResult.isHoliday) {
+                status = att?.checkInAt ? att.status : 'HOLIDAY';
+              } else if (!evalResult.isWorkingDay) {
+                status = att?.checkInAt ? att.status : 'OFF';
+              } else if (matchingLeave) {
+                status = 'LEAVE';
+              } else if (att?.checkInAt) {
+                status = att.status;
+              } else {
+                status = 'ABSENT';
+              }
+            }
+
+            if (evalResult.isHoliday) {
+              summaryHolidays++;
+            } else if (!evalResult.isWorkingDay) {
+              summaryOffDays++;
+            } else {
+              summaryWorkingDays++;
+            }
+
+            if (status === 'PRESENT') {
+              summaryPresent++;
+            } else if (status === 'LATE') {
+              summaryLate++;
+            } else if (status === 'HALF_DAY') {
+              summaryHalfDay++;
+            } else if (status === 'ABSENT') {
+              summaryAbsent++;
+            } else if (status === 'LEAVE') {
+              summaryLeave++;
+            }
+
+
+            allRecords.push({
+              id: att?.id || `calendar-${emp.id}-${dateStr}`,
+              employeeId: emp.id,
+              employee: {
+                id: emp.id,
+                displayName: emp.displayName || emp.display_name,
+                firstName: emp.firstName || emp.first_name,
+                lastName: emp.lastName || emp.last_name,
+                employeeCode: emp.employeeCode || emp.employee_code,
+              },
+              attendanceDate: dateStr,
+              status,
+              workMode: att?.workMode || 'OFFICE',
+              verificationMethod: att?.verificationMethod || 'MANUAL',
+              checkInAt: att?.checkInAt || null,
+              checkOutAt: att?.checkOutAt || null,
+              totalWorkMinutes: att?.totalWorkMinutes || null,
+              isWorkingDay: evalResult.isWorkingDay,
+              holidayName: evalResult.holidayName || null,
+              leaveType: matchingLeave?.leaveType?.name || null,
+              leaveReason: matchingLeave?.reason || null,
+              notes: att?.notes || null,
+              isDerived: !att,
+            });
+          }
+        }
+
+        let filteredRecords = allRecords;
+        if (statusFilter && statusFilter.toUpperCase() !== 'ALL') {
+          const normFilter = statusFilter.toUpperCase();
+          filteredRecords = allRecords.filter((r) => {
+            if (normFilter === 'LEAVE') return r.status === 'LEAVE' || r.status === 'ON_LEAVE';
+            if (normFilter === 'OFF') return r.status === 'OFF' || r.status === 'WEEKEND';
+            return r.status === normFilter;
+          });
+        }
+
+        filteredRecords.sort((a, b) => {
+          if (b.attendanceDate !== a.attendanceDate) {
+            return b.attendanceDate.localeCompare(a.attendanceDate);
+          }
+          return (a.employee?.displayName || '').localeCompare(b.employee?.displayName || '');
+        });
+
+        return {
+          records: filteredRecords,
+          summary: {
+            totalDays: dateStrings.length * activeEmployees.length,
+            workingDays: summaryWorkingDays,
+            present: summaryPresent,
+            late: summaryLate,
+            halfDay: summaryHalfDay,
+            absent: summaryAbsent,
+            leave: summaryLeave,
+            holidays: summaryHolidays,
+            offDays: summaryOffDays,
+          },
+        };
       }
     );
   }
 }
+
+

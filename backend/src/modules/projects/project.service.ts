@@ -5,6 +5,8 @@ import { DbService } from '../../services/db.service.js';
 import { TaskService } from '../tasks/task.service.js';
 import { EmployeeService } from '../employees/employee.service.js';
 import { AuditService } from '../../services/audit.service.js';
+import { RbacService } from '../../services/rbac.service.js';
+import { NotificationService } from '../notifications/notification.service.js';
 import { prisma } from '../../plugins/prisma.js';
 
 interface StoredProjectMember {
@@ -183,9 +185,10 @@ export class ProjectService {
    */
   public static async listProjects(
     user: AuthUser,
-    params: { search?: string; status?: string; employeeId?: string } = {}
+    params: { search?: string; status?: string; employeeId?: string; adminView?: boolean } = {}
   ): Promise<Project[]> {
     const projects = await ProjectService.getStoredProjects();
+    const isSuper = user.role === 'SUPER_ADMIN' || user.appRole === 'SUPER_ADMIN';
 
     // Fetch all relevant tasks with timers and employees
     const allTasksResult = await TaskService.listTasks({
@@ -218,9 +221,6 @@ export class ProjectService {
     const result: Project[] = [];
 
     for (const proj of projects) {
-      const isStaff = user.role === 'SUPER_ADMIN' || user.role === 'ADMIN' || user.role === 'MANAGER';
-      const isParticipant = ProjectService.isProjectParticipant(proj, user);
-
       // Find tasks belonging to this project
       const projTasks = allTasks.filter((t: any) => {
         if (t.projectId === proj.id) return true;
@@ -229,11 +229,33 @@ export class ProjectService {
         return false;
       });
 
+      const isParticipant = ProjectService.isProjectParticipant(proj, user);
       const isTaskAssignee = user.employeeId && projTasks.some((t: any) => t.employeeId === user.employeeId);
 
-      // Authorization filter
-      if (!isStaff && !isParticipant && !isTaskAssignee) {
-        continue;
+      const isAdminContext = isSuper || (params.adminView && user.appRole === 'LIMITED_ADMIN');
+
+      if (isAdminContext) {
+        // Administrative Context (/admin-view/projects or /admin/projects)
+        const isStaff = isSuper || user.role === 'ADMIN' || user.role === 'MANAGER';
+        const hasProjectAdminPerm =
+          user.appRole === 'LIMITED_ADMIN' &&
+          (RbacService.hasPermission(user, 'PROJECT_CREATE') ||
+            RbacService.hasPermission(user, 'PROJECT_UPDATE') ||
+            RbacService.hasPermission(user, 'PROJECT_EDIT') ||
+            RbacService.hasPermission(user, 'PROJECT_ASSIGN') ||
+            RbacService.hasPermission(user, 'PROJECT_DELETE') ||
+            RbacService.hasPermission(user, 'TEAM_MEMBER_ADD'));
+        const isScopedLimitedAdmin = hasProjectAdminPerm && (await RbacService.hasScopeAccess(user, { projectId: proj.id }));
+
+        if (!isStaff && !isScopedLimitedAdmin) {
+          continue;
+        }
+      } else {
+        // Personal Employee Context (Employee View: /tasks, /dashboard, etc.)
+        // Strictly restricted to projects where the employee is a direct participant or assigned tasks
+        if (!isParticipant && !isTaskAssignee) {
+          continue;
+        }
       }
 
       // Status filter
@@ -328,6 +350,7 @@ export class ProjectService {
 
       result.push({
         ...proj,
+        assignedDate: proj.startDate || null,
         members: hydratedMembers,
         totalTasks: projTasks.length,
         completedTasks: completedCount,
@@ -373,10 +396,17 @@ export class ProjectService {
     });
 
     const isStaff = user.role === 'SUPER_ADMIN' || user.role === 'ADMIN' || user.role === 'MANAGER';
+    const isLimitedAdmin =
+      user.appRole === 'LIMITED_ADMIN' &&
+      (RbacService.hasPermission(user, 'PROJECT_VIEW') ||
+        RbacService.hasPermission(user, 'PROJECT_CREATE') ||
+        RbacService.hasPermission(user, 'PROJECT_UPDATE') ||
+        RbacService.hasPermission(user, 'TEAM_MEMBER_ADD'));
+    const isScopedLimitedAdmin = isLimitedAdmin && (await RbacService.hasScopeAccess(user, { projectId: proj.id }));
     const isParticipant = ProjectService.isProjectParticipant(proj, user);
     const isTaskAssignee = user.employeeId && projTasks.some((t: any) => t.employeeId === user.employeeId);
 
-    if (!isStaff && !isParticipant && !isTaskAssignee) {
+    if (!isStaff && !isScopedLimitedAdmin && !isParticipant && !isTaskAssignee) {
       const err: any = new Error('Forbidden');
       err.statusCode = 403;
       throw err;
@@ -471,6 +501,7 @@ export class ProjectService {
 
     return {
       ...proj,
+      assignedDate: proj.startDate || null,
       members: hydratedMembers,
       tasks: projTasks.map((t: any) => ({
         ...t,
@@ -499,9 +530,8 @@ export class ProjectService {
     user: AuthUser,
     clientInfo: { ipAddress?: string; userAgent?: string }
   ): Promise<Project> {
-    const isStaff = user.role === 'SUPER_ADMIN' || user.role === 'ADMIN' || user.role === 'MANAGER';
-    if (!isStaff) {
-      const err: any = new Error('Only admins and managers can create projects');
+    if (!RbacService.hasPermission(user, 'PROJECT_CREATE')) {
+      const err: any = new Error('Forbidden: You do not have permission to create projects (PROJECT_CREATE required)');
       err.statusCode = 403;
       throw err;
     }
@@ -527,6 +557,13 @@ export class ProjectService {
         const err: any = new Error('Only active employees can be added to a new project.');
         err.statusCode = 400;
         err.code = 'EMPLOYEE_NOT_ACTIVE';
+        throw err;
+      }
+      const inScope = await RbacService.hasScopeAccess(user, { employeeId: empId });
+      if (!inScope) {
+        const err: any = new Error(`Employee ${empId} is outside your permitted administrative scope.`);
+        err.statusCode = 403;
+        err.code = 'EMPLOYEE_OUTSIDE_SCOPE';
         throw err;
       }
     }
@@ -568,7 +605,7 @@ export class ProjectService {
       status: input.status || 'IN_PROGRESS',
       createdBy: user.id,
       employeeId: input.employeeId || null,
-      startDate: input.startDate || now.split('T')[0],
+      startDate: input.assignedDate || input.startDate || now.split('T')[0],
       dueDate: input.dueDate || null,
       completedAt: input.status === 'COMPLETED' ? now : null,
       createdAt: now,
@@ -590,6 +627,31 @@ export class ProjectService {
       ipAddress: clientInfo.ipAddress,
       userAgent: clientInfo.userAgent,
     });
+
+    // Notify added team members asynchronously
+    (async () => {
+      try {
+        const empIds = members.map((m) => m.employeeId).filter(Boolean);
+        if (empIds.length > 0) {
+          const userMaps = await NotificationService.resolveUserIdsFromEmployeeIds(empIds);
+          const notifications = userMaps
+            .filter((u) => u.userId && u.userId !== user.id)
+            .map((u) => ({
+              userId: u.userId,
+              type: 'PROJECT_MEMBER_ADDED' as const,
+              title: `Added to Project: ${newProject.name}`,
+              message: `You have been added to the project "${newProject.name}".`,
+              actionUrl: `/tasks`,
+              entityType: 'project',
+              entityId: newProject.id,
+              actorId: user.id,
+            }));
+          await NotificationService.createBulkNotifications(notifications);
+        }
+      } catch (err: any) {
+        console.error('[ProjectService] Failed to notify members of new project:', err.message);
+      }
+    })();
 
     return await ProjectService.getProjectById(newProject.id, user);
   }
@@ -613,8 +675,14 @@ export class ProjectService {
     }
 
     const existing = projects[index];
-    if (!ProjectService.isProjectManager(existing, user)) {
-      const err: any = new Error('Forbidden: Only admins and project managers can edit project details');
+    if (!RbacService.hasPermission(user, 'PROJECT_EDIT') && !ProjectService.isProjectManager(existing, user)) {
+      const err: any = new Error('Forbidden: Only authorized admins and project managers can edit project details');
+      err.statusCode = 403;
+      throw err;
+    }
+
+    if (!(await RbacService.hasScopeAccess(user, { projectId: id }))) {
+      const err: any = new Error('Forbidden: Project is outside your assigned administrative scope');
       err.statusCode = 403;
       throw err;
     }
@@ -654,7 +722,7 @@ export class ProjectService {
       description: input.description !== undefined ? input.description : existing.description,
       status: input.status || existing.status,
       employeeId: input.employeeId !== undefined ? input.employeeId : existing.employeeId,
-      startDate: input.startDate !== undefined ? input.startDate : existing.startDate,
+      startDate: input.assignedDate !== undefined ? input.assignedDate : (input.startDate !== undefined ? input.startDate : existing.startDate),
       dueDate: input.dueDate !== undefined ? input.dueDate : existing.dueDate,
       completedAt,
       members: updatedMembers,
@@ -674,6 +742,31 @@ export class ProjectService {
       ipAddress: clientInfo.ipAddress,
       userAgent: clientInfo.userAgent,
     });
+
+    // Notify project members asynchronously
+    (async () => {
+      try {
+        const empIds = (updated.members || []).map((m) => m.employeeId).filter(Boolean);
+        if (empIds.length > 0) {
+          const userMaps = await NotificationService.resolveUserIdsFromEmployeeIds(empIds);
+          const notifications = userMaps
+            .filter((u) => u.userId && u.userId !== user.id)
+            .map((u) => ({
+              userId: u.userId,
+              type: 'PROJECT_UPDATED' as const,
+              title: `Project Updated: ${updated.name}`,
+              message: `Project "${updated.name}" details or status was updated.`,
+              actionUrl: `/tasks`,
+              entityType: 'project',
+              entityId: id,
+              actorId: user.id,
+            }));
+          await NotificationService.createBulkNotifications(notifications);
+        }
+      } catch (err: any) {
+        console.error('[ProjectService] Failed to notify members of project update:', err.message);
+      }
+    })();
 
     return await ProjectService.getProjectById(id, user);
   }
@@ -705,8 +798,14 @@ export class ProjectService {
     }
 
     const project = projects[index];
-    if (!ProjectService.isProjectManager(project, user)) {
-      const err: any = new Error('Forbidden: Only project leads or admins can manage team members');
+    if (!RbacService.hasPermission(user, 'TEAM_MEMBER_ADD') && !ProjectService.isProjectManager(project, user)) {
+      const err: any = new Error('Forbidden: Only project leads or authorized admins can manage team members (TEAM_MEMBER_ADD required)');
+      err.statusCode = 403;
+      throw err;
+    }
+
+    if (!(await RbacService.hasScopeAccess(user, { projectId, employeeId: input.employeeId }))) {
+      const err: any = new Error('Forbidden: Project or target employee is outside your assigned administrative scope');
       err.statusCode = 403;
       throw err;
     }
@@ -763,6 +862,25 @@ export class ProjectService {
       userAgent: clientInfo.userAgent,
     });
 
+    // Notify added employee asynchronously
+    (async () => {
+      try {
+        const emp = await NotificationService.resolveUserIdFromEmployeeId(input.employeeId);
+        if (emp?.userId && emp.userId !== user.id) {
+          await NotificationService.createNotification({
+            userId: emp.userId,
+            type: 'PROJECT_MEMBER_ADDED',
+            title: `Added to Project: ${project.name}`,
+            message: `You have been added to "${project.name}" as ${input.projectRole || 'Contributor'}.`,
+            actionUrl: `/tasks`,
+            entityType: 'project',
+            entityId: projectId,
+            actorId: user.id,
+          });
+        }
+      } catch (err) {}
+    })();
+
     const fullProj = await ProjectService.getProjectById(projectId, user);
     return fullProj.members?.find((m) => m.employeeId === input.employeeId) || (memberItem as any);
   }
@@ -786,8 +904,14 @@ export class ProjectService {
     }
 
     const project = projects[index];
-    if (!ProjectService.isProjectManager(project, user)) {
-      const err: any = new Error('Forbidden: Only project leads or admins can manage team members');
+    if (!RbacService.hasPermission(user, 'TEAM_MEMBER_REMOVE') && !ProjectService.isProjectManager(project, user)) {
+      const err: any = new Error('Forbidden: Only project leads or authorized admins can remove team members (TEAM_MEMBER_REMOVE required)');
+      err.statusCode = 403;
+      throw err;
+    }
+
+    if (!(await RbacService.hasScopeAccess(user, { projectId, employeeId }))) {
+      const err: any = new Error('Forbidden: Project or employee is outside your assigned administrative scope');
       err.statusCode = 403;
       throw err;
     }
@@ -809,6 +933,25 @@ export class ProjectService {
       ipAddress: clientInfo.ipAddress,
       userAgent: clientInfo.userAgent,
     });
+
+    // Notify removed employee asynchronously
+    (async () => {
+      try {
+        const emp = await NotificationService.resolveUserIdFromEmployeeId(employeeId);
+        if (emp?.userId && emp.userId !== user.id) {
+          await NotificationService.createNotification({
+            userId: emp.userId,
+            type: 'PROJECT_MEMBER_REMOVED',
+            title: `Removed from Project: ${project.name}`,
+            message: `You were removed from project "${project.name}".`,
+            actionUrl: `/tasks`,
+            entityType: 'project',
+            entityId: projectId,
+            actorId: user.id,
+          });
+        }
+      } catch (err) {}
+    })();
 
     return { success: true, message: 'Member removed from project successfully' };
   }
@@ -833,8 +976,14 @@ export class ProjectService {
     }
 
     const project = projects[index];
-    if (!ProjectService.isProjectManager(project, user)) {
-      const err: any = new Error('Forbidden: Only project leads or admins can update team member roles');
+    if (!RbacService.hasPermission(user, 'TEAM_MEMBER_ADD') && !ProjectService.isProjectManager(project, user)) {
+      const err: any = new Error('Forbidden: Only project leads or authorized admins can update team member roles');
+      err.statusCode = 403;
+      throw err;
+    }
+
+    if (!(await RbacService.hasScopeAccess(user, { projectId, employeeId }))) {
+      const err: any = new Error('Forbidden: Project or employee is outside your assigned administrative scope');
       err.statusCode = 403;
       throw err;
     }

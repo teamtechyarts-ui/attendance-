@@ -14,6 +14,7 @@ export async function taskRoutes(fastify: FastifyInstance) {
   fastify.post('/', TaskController.create);
   fastify.put('/:id', TaskController.update);
   fastify.patch('/:id', TaskController.update);
+  fastify.delete('/:id', TaskController.delete);
 
   // Comments routes
   fastify.get('/:id/comments', TaskController.listComments);

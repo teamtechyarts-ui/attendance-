@@ -1,6 +1,7 @@
 import { prisma } from '../../plugins/prisma.js';
 import { DbService } from '../../services/db.service.js';
 import { AuditService } from '../../services/audit.service.js';
+import { RbacService } from '../../services/rbac.service.js';
 import { CreateFeedbackInput } from '../../validation/index.js';
 import { AuthUser, FeedbackPeriod } from '../../types/index.js';
 
@@ -8,6 +9,7 @@ export class FeedbackService {
   public static async listFeedback(params: {
     employeeId?: string;
     period?: FeedbackPeriod;
+    adminView?: boolean;
     user: AuthUser;
     page?: number;
     limit?: number;
@@ -15,17 +17,44 @@ export class FeedbackService {
     const page = Math.max(1, params.page || 1);
     const limit = Math.min(100, Math.max(1, params.limit || 30));
     const skip = (page - 1) * limit;
+    const isSuper = params.user.role === 'SUPER_ADMIN' || params.user.appRole === 'SUPER_ADMIN';
+
+    const where: any = {};
+    if (params.adminView) {
+      const hasFeedbackAdminPerm =
+        isSuper ||
+        ((params.user.appRole === 'LIMITED_ADMIN' || params.user.role === 'ADMIN') &&
+          (RbacService.hasPermission(params.user, 'EMPLOYEE_VIEW') ||
+            RbacService.hasPermission(params.user, 'EMPLOYEE_UPDATE') ||
+            RbacService.hasPermission(params.user, 'WORK_VIEW')));
+
+      if (!hasFeedbackAdminPerm) {
+        const err: any = new Error('Forbidden: You do not have administrative permission to view team reviews');
+        err.statusCode = 403;
+        throw err;
+      }
+
+      if (params.employeeId && params.employeeId !== 'undefined' && params.employeeId !== 'null' && params.employeeId.trim() !== '') {
+        if (!isSuper) {
+          const hasScope = await RbacService.hasScopeAccess(params.user, { employeeId: params.employeeId });
+          if (!hasScope) {
+            const err: any = new Error('Forbidden: Target employee is outside your permitted administrative scope');
+            err.statusCode = 403;
+            throw err;
+          }
+        }
+        where.employeeId = params.employeeId;
+      } else if (params.user.scope?.employees && Array.isArray(params.user.scope.employees) && params.user.scope.employees.length > 0) {
+        where.employeeId = { in: params.user.scope.employees };
+      }
+    } else {
+      // Personal Employee Context (Employee View)
+      where.employeeId = params.user.employeeId || '__NONE__';
+    }
+    if (params.period) where.period = params.period;
 
     return DbService.query(
       async () => {
-        const where: any = {};
-        if (params.user.role === 'EMPLOYEE') {
-          where.employeeId = params.user.employeeId;
-        } else if (params.employeeId) {
-          where.employeeId = params.employeeId;
-        }
-        if (params.period) where.period = params.period;
-
         const [items, total] = await Promise.all([
           prisma.feedback.findMany({
             where,
@@ -47,10 +76,12 @@ export class FeedbackService {
       },
       async () => {
         let path = `/feedback?select=*,employee:employees(id,display_name,employee_code,profile_photo_url),reviewer:users(id,email)&order=period_end.desc&limit=${limit}&offset=${skip}`;
-        if (params.user.role === 'EMPLOYEE' && params.user.employeeId) {
-          path += `&employee_id=eq.${params.user.employeeId}`;
-        } else if (params.employeeId) {
-          path += `&employee_id=eq.${params.employeeId}`;
+        if (where.employeeId) {
+          if (typeof where.employeeId === 'object' && where.employeeId.in) {
+            path += `&employee_id=in.(${where.employeeId.in.join(',')})`;
+          } else {
+            path += `&employee_id=eq.${where.employeeId}`;
+          }
         }
         if (params.period) path += `&period=eq.${params.period}`;
 

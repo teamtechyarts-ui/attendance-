@@ -27,6 +27,7 @@ export default function AdminReportsPage() {
         reportsApi.list({
           employeeId: selectedEmp || undefined,
           reportDate: reportDate || undefined,
+          adminView: true,
         }),
         employeesApi.list(),
       ]);
@@ -84,8 +85,12 @@ export default function AdminReportsPage() {
 
       <Card>
         <CardContent className="p-0">
-          {isLoading ? (
-            <LoadingState message="Loading reports..." />
+          {isLoading && reports.length === 0 ? (
+            <div className="space-y-3 p-5 animate-pulse">
+              <div className="h-8 bg-neutral-100 rounded w-full"></div>
+              <div className="h-8 bg-neutral-100 rounded w-full"></div>
+              <div className="h-8 bg-neutral-100 rounded w-full"></div>
+            </div>
           ) : reports.length === 0 ? (
             <div className="p-8">
               <EmptyState icon={FileText} title="No reports found" description="No daily reports submitted for the chosen criteria." />

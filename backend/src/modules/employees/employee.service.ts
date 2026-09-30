@@ -5,6 +5,8 @@ import { AuditService } from '../../services/audit.service.js';
 import { EmailService } from '../../services/email.service.js';
 import { config } from '../../config/env.js';
 import { CreateEmployeeInput, UpdateEmployeeInput } from '../../validation/index.js';
+import { AuthUser } from '../../types/index.js';
+import { RbacService } from '../../services/rbac.service.js';
 
 
 export class EmployeeService {
@@ -80,7 +82,9 @@ export class EmployeeService {
 
     return DbService.query(
       async () => {
-        const where: any = {};
+        const where: any = {
+          NOT: { user: { role: 'SUPER_ADMIN' } },
+        };
         if (params.departmentId) where.departmentId = params.departmentId;
         if (params.designationId) where.designationId = params.designationId;
 
@@ -126,7 +130,8 @@ export class EmployeeService {
           prisma.employee.count({ where }),
         ]);
 
-        const sorted = [...items].sort((a, b) => {
+        const validItems = items.filter((e) => e.user?.role !== 'SUPER_ADMIN');
+        const sorted = [...validItems].sort((a, b) => {
           const aActive = EmployeeService.isEmployeeEligibleForNewWork(a) ? 0 : 1;
           const bActive = EmployeeService.isEmployeeEligibleForNewWork(b) ? 0 : 1;
           if (aActive !== bActive) return aActive - bActive;
@@ -160,7 +165,8 @@ export class EmployeeService {
         }
 
         const rawItems = await DbService.restRequest<any[]>(path);
-        const sorted = [...(rawItems || [])].sort((a, b) => {
+        const filtered = (rawItems || []).filter((e) => e.user?.role !== 'SUPER_ADMIN');
+        const sorted = [...filtered].sort((a, b) => {
           const aActive = EmployeeService.isEmployeeEligibleForNewWork(a) ? 0 : 1;
           const bActive = EmployeeService.isEmployeeEligibleForNewWork(b) ? 0 : 1;
           if (aActive !== bActive) return aActive - bActive;
@@ -173,6 +179,97 @@ export class EmployeeService {
           items: sorted,
           meta: { page, limit, total: sorted.length, totalPages: 1 },
         };
+      }
+    );
+  }
+
+  /**
+   * List active, eligible employees within the authenticated user's administrative scope.
+   * Excludes Super Admins (unless caller is Super Admin) and deactivated/terminated employees.
+   */
+  public static async listAssignableEmployees(
+    user: AuthUser,
+    params: { search?: string; departmentId?: string; projectId?: string } = {}
+  ) {
+    return DbService.query(
+      async () => {
+        const where: any = {
+          employmentStatus: 'ACTIVE',
+          NOT: { user: { role: 'SUPER_ADMIN' } },
+        };
+
+        if (params.departmentId) {
+          where.departmentId = params.departmentId;
+        }
+
+        if (params.search && params.search.trim()) {
+          where.OR = [
+            { firstName: { contains: params.search, mode: 'insensitive' } },
+            { lastName: { contains: params.search, mode: 'insensitive' } },
+            { displayName: { contains: params.search, mode: 'insensitive' } },
+            { employeeCode: { contains: params.search, mode: 'insensitive' } },
+            { email: { contains: params.search, mode: 'insensitive' } },
+          ];
+        }
+
+        const employees = await prisma.employee.findMany({
+          where,
+          include: {
+            department: true,
+            designation: true,
+            user: {
+              select: { id: true, email: true, role: true, status: true },
+            },
+          },
+          orderBy: [{ displayName: 'asc' }],
+        });
+
+        // Filter eligible active employees and check user scope
+        const scopedList = [];
+        for (const emp of employees) {
+          // Check user status
+          if (emp.user && emp.user.status !== 'ACTIVE') {
+            continue;
+          }
+          // Super Admin accounts must NEVER be returned as assignable employees
+          if (emp.user?.role === 'SUPER_ADMIN') {
+            continue;
+          }
+
+          const inScope = await RbacService.hasScopeAccess(user, {
+            employeeId: emp.id,
+            departmentId: emp.departmentId,
+          });
+          if (inScope) {
+            scopedList.push(emp);
+          }
+        }
+
+        return scopedList;
+      },
+      async () => {
+        const employees = await DbService.restRequest<any[]>(
+          `/employees?employment_status=eq.ACTIVE&select=*,department:departments(*),designation:designations(*),user:users(id,email,role,status)`
+        );
+        const filtered = (employees || []).filter((emp) => {
+          const uStatus = emp.user?.status || 'ACTIVE';
+          const uRole = emp.user?.role || 'EMPLOYEE';
+          if (uStatus !== 'ACTIVE') return false;
+          if (uRole === 'SUPER_ADMIN') return false;
+          return true;
+        });
+
+        const scopedList = [];
+        for (const emp of filtered) {
+          const inScope = await RbacService.hasScopeAccess(user, {
+            employeeId: emp.id,
+            departmentId: emp.departmentId || emp.department_id,
+          });
+          if (inScope) {
+            scopedList.push(emp);
+          }
+        }
+        return scopedList;
       }
     );
   }
@@ -863,5 +960,35 @@ export class EmployeeService {
         return res[0];
       }
     );
+  }
+
+  /**
+   * Generates the next sequential unique Employee Code (e.g. EMP006)
+   * Finds the highest numeric suffix in existing employee records to guarantee no collisions or reuse.
+   */
+  public static async generateNextEmployeeCode(): Promise<string> {
+    const employees = await DbService.query(
+      async () => prisma.employee.findMany({ select: { employeeCode: true } }),
+      async () => {
+        const raw = await DbService.restRequest<any[]>('/employees?select=employee_code');
+        return (raw || []).map((e: any) => ({ employeeCode: e.employee_code || e.employeeCode || '' }));
+      }
+    );
+
+    let maxNum = 0;
+    for (const emp of employees || []) {
+      const code = (emp.employeeCode || (emp as any).employee_code || '').trim();
+      const match = code.match(/(\d+)$/);
+      if (match) {
+        const num = parseInt(match[1], 10);
+        if (!isNaN(num) && num > maxNum) {
+          maxNum = num;
+        }
+      }
+    }
+
+    const nextNum = maxNum + 1;
+    const formatted = `EMP${String(nextNum).padStart(3, '0')}`;
+    return formatted;
   }
 }

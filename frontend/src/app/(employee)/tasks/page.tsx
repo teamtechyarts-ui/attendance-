@@ -47,6 +47,10 @@ export default function TasksPage() {
   const [search, setSearch] = useState('');
   const [isLoading, setIsLoading] = useState(true);
 
+  // Sorting state (Default: Created Date DESC)
+  const [sortBy, setSortBy] = useState<string>('createdAt');
+  const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
+
   // Modals
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
@@ -61,42 +65,136 @@ export default function TasksPage() {
   const [selectedProjId, setSelectedProjId] = useState('');
   const [taskAssigneeId, setTaskAssigneeId] = useState('');
   const [priority, setPriority] = useState<TaskPriority>('MEDIUM');
+  const [assignedDate, setAssignedDate] = useState(() => new Date().toISOString().split('T')[0]);
   const [dueDate, setDueDate] = useState('');
   const [estimatedMinutes, setEstimatedMinutes] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // New project form state (Additive capability for Limited Admins / Super Admin)
+  const canCreateProject = Boolean(user?.role === 'SUPER_ADMIN' || user?.permissions?.includes('PROJECT_CREATE'));
+  const [isProjectCreateOpen, setIsProjectCreateOpen] = useState(false);
+  const [projName, setProjName] = useState('');
+  const [projDescription, setProjDescription] = useState('');
+  const [projAssignedDate, setProjAssignedDate] = useState(() => new Date().toISOString().split('T')[0]);
+  const [projDueDate, setProjDueDate] = useState('');
+  const [isSubmittingProject, setIsSubmittingProject] = useState(false);
+
+  const handleCreateProject = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!projName.trim()) return;
+    setIsSubmittingProject(true);
+    try {
+      await projectsApi.create({
+        name: projName,
+        status: 'IN_PROGRESS',
+        description: projDescription || undefined,
+        assignedDate: projAssignedDate || undefined,
+        startDate: projAssignedDate || undefined,
+        dueDate: projDueDate || undefined,
+      });
+      setIsProjectCreateOpen(false);
+      setProjName('');
+      setProjDescription('');
+      setProjAssignedDate(new Date().toISOString().split('T')[0]);
+      setProjDueDate('');
+      fetchData();
+    } catch (err: any) {
+      alert(err.message || 'Failed to create project');
+    } finally {
+      setIsSubmittingProject(false);
+    }
+  };
+
   const fetchData = useCallback(async () => {
     try {
-      const [taskData, sumData, projData] = await Promise.all([
-        tasksApi.list({
-          search: search || undefined,
-          status: filterStatus === 'ALL' ? undefined : filterStatus,
-        }).catch((e) => {
-          console.error('[TasksPage] tasksApi.list failed:', e);
-          return [];
-        }),
-        tasksApi.getSummary().catch(() => null),
-        projectsApi.list({
-          search: search || undefined,
-        }).catch(() => []),
-      ]);
+      // Fetch primary tasks list and secondary summary/projects concurrently
+      const tasksPromise = tasksApi.list({
+        search: search || undefined,
+        status: filterStatus === 'ALL' ? undefined : filterStatus,
+        sortBy,
+        sortOrder,
+      }).catch((e) => {
+        console.error('[TasksPage] tasksApi.list failed:', e);
+        return [];
+      });
+
+      const summaryPromise = tasksApi.getSummary().catch(() => null);
+      const projectsPromise = projectsApi.list({
+        search: search || undefined,
+      }).catch(() => []);
+
+      // Primary tasks resolution
+      const taskData = await tasksPromise;
       setTasks(taskData || []);
-      setSummary(sumData || null);
-      setProjects(projData || []);
+      setIsLoading(false);
+
+      // Secondary summary & projects resolution
+      const [sumData, projData] = await Promise.all([summaryPromise, projectsPromise]);
+      if (sumData) setSummary(sumData);
+      if (projData) setProjects(projData);
     } catch (err) {
       console.error('[TasksPage] Error loading data:', err);
-    } finally {
       setIsLoading(false);
     }
-  }, [search, filterStatus]);
+  }, [search, filterStatus, sortBy, sortOrder]);
 
   useEffect(() => {
     fetchData();
   }, [fetchData]);
 
+  const handleStartTimer = async (taskId: string) => {
+    const res = await startTimer(taskId);
+    if (res && res.task) {
+      setTasks((prev) =>
+        prev.map((t) => {
+          if (t.id === taskId) {
+            return {
+              ...t,
+              ...res.task,
+              status: 'IN_PROGRESS',
+            };
+          }
+          if (t.status === 'IN_PROGRESS') {
+            return {
+              ...t,
+              status: 'PAUSED',
+            };
+          }
+          return t;
+        })
+      );
+    }
+    fetchData();
+  };
+
+  const handlePauseTimer = async (taskId: string) => {
+    const res = await pauseTimer(taskId);
+    if (res && res.task) {
+      setTasks((prev) =>
+        prev.map((t) => (t.id === taskId ? { ...t, ...res.task, status: 'PAUSED' } : t))
+      );
+    }
+    fetchData();
+  };
+
+  const handleStopTimer = async (taskId: string) => {
+    const res = await stopTimer(taskId);
+    if (res && res.task) {
+      setTasks((prev) =>
+        prev.map((t) => (t.id === taskId ? { ...t, ...res.task, status: 'COMPLETED' } : t))
+      );
+    }
+    fetchData();
+  };
+
   const handleCreateTask = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
+
+    if (assignedDate && dueDate && new Date(dueDate) < new Date(assignedDate)) {
+      alert('Due date must be on or after assigned date');
+      return;
+    }
 
     setIsSubmitting(true);
     try {
@@ -106,6 +204,8 @@ export default function TasksPage() {
           description: description || null,
           priority,
           employeeId: taskAssigneeId || undefined,
+          assignedDate: assignedDate || null,
+          startDate: assignedDate || null,
           dueDate: dueDate || null,
           estimatedMinutes: estimatedMinutes ? parseInt(estimatedMinutes, 10) : null,
         });
@@ -114,6 +214,8 @@ export default function TasksPage() {
           title,
           description: description || null,
           priority,
+          assignedDate: assignedDate || null,
+          startDate: assignedDate || null,
           dueDate: dueDate || null,
           estimatedMinutes: estimatedMinutes ? parseInt(estimatedMinutes, 10) : null,
         });
@@ -124,6 +226,8 @@ export default function TasksPage() {
       setDescription('');
       setSelectedProjId('');
       setTaskAssigneeId('');
+      setDueDate('');
+      setAssignedDate(new Date().toISOString().split('T')[0]);
       fetchData();
     } catch (err: any) {
       alert(err.message || 'Failed to create task');
@@ -193,6 +297,15 @@ export default function TasksPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {canCreateProject && (
+            <Button
+              variant="outline"
+              onClick={() => setIsProjectCreateOpen(true)}
+              className="gap-1.5 shadow-sm text-xs border-neutral-300 hover:border-black"
+            >
+              <FolderPlus className="w-3.5 h-3.5" /> New Project
+            </Button>
+          )}
           <Button onClick={() => setIsCreateOpen(true)} className="gap-1.5 shadow-sm text-xs">
             <Plus className="w-3.5 h-3.5" /> New Task
           </Button>
@@ -200,58 +313,56 @@ export default function TasksPage() {
       </div>
 
       {/* Summary KPI Cards */}
-      {summary && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          <Card className="p-4 bg-white border-neutral-200">
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-neutral-500 font-medium">My Tasks</span>
-              <Briefcase className="w-4 h-4 text-neutral-400" />
-            </div>
-            <div className="text-xl font-extrabold text-neutral-900 mt-1">{summary.totalTasks ?? tasks.length}</div>
-            <div className="text-[11px] text-neutral-400 mt-0.5">{projects.length} connected projects</div>
-          </Card>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <Card className="p-4 bg-white border-neutral-200">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-neutral-500 font-medium">My Tasks</span>
+            <Briefcase className="w-4 h-4 text-neutral-400" />
+          </div>
+          <div className="text-xl font-extrabold text-neutral-900 mt-1">{summary?.totalTasks ?? tasks.length}</div>
+          <div className="text-[11px] text-neutral-400 mt-0.5">{projects.length} connected projects</div>
+        </Card>
 
-          <Card className="p-4 bg-white border-neutral-200">
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-neutral-500 font-medium">Active Timer</span>
-              <Timer className="w-4 h-4 text-emerald-500" />
-            </div>
-            <div className="text-xl font-extrabold text-emerald-600 mt-1 flex items-center gap-1.5 font-mono">
-              {activeTimer ? (
-                <>
-                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
-                  {formatSecondsToTime(elapsedSeconds)}
-                </>
-              ) : (
-                <span className="text-neutral-400 font-normal text-sm">No timer running</span>
-              )}
-            </div>
-            <div className="text-[11px] text-neutral-400 mt-0.5">
-              {activeTimer ? activeTimer.task?.title || 'Active task' : 'Idle'}
-            </div>
-          </Card>
+        <Card className="p-4 bg-white border-neutral-200">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-neutral-500 font-medium">Active Timer</span>
+            <Timer className="w-4 h-4 text-emerald-500" />
+          </div>
+          <div className="text-xl font-extrabold text-emerald-600 mt-1 flex items-center gap-1.5 font-mono">
+            {activeTimer ? (
+              <>
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
+                {formatSecondsToTime(elapsedSeconds)}
+              </>
+            ) : (
+              <span className="text-neutral-400 font-normal text-sm">No timer running</span>
+            )}
+          </div>
+          <div className="text-[11px] text-neutral-400 mt-0.5">
+            {activeTimer ? activeTimer.task?.title || 'Active task' : 'Idle'}
+          </div>
+        </Card>
 
-          <Card className="p-4 bg-white border-neutral-200">
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-neutral-500 font-medium">Time Logged</span>
-              <Clock className="w-4 h-4 text-blue-500" />
-            </div>
-            <div className="text-xl font-extrabold text-neutral-900 mt-1 font-mono">
-              {formatSecondsToTime(summary.totalWorkedSeconds ?? 0)}
-            </div>
-            <div className="text-[11px] text-neutral-400 mt-0.5">({summary.totalWorkedHours ?? 0} hrs total)</div>
-          </Card>
+        <Card className="p-4 bg-white border-neutral-200">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-neutral-500 font-medium">Time Logged</span>
+            <Clock className="w-4 h-4 text-blue-500" />
+          </div>
+          <div className="text-xl font-extrabold text-neutral-900 mt-1 font-mono">
+            {formatSecondsToTime(summary?.totalWorkedSeconds ?? 0)}
+          </div>
+          <div className="text-[11px] text-neutral-400 mt-0.5">({summary?.totalWorkedHours ?? 0} hrs total)</div>
+        </Card>
 
-          <Card className="p-4 bg-white border-neutral-200">
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-neutral-500 font-medium">Completed</span>
-              <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-            </div>
-            <div className="text-xl font-extrabold text-neutral-900 mt-1">{summary.completedTasks ?? 0}</div>
-            <div className="text-[11px] text-neutral-400 mt-0.5">Tasks completed</div>
-          </Card>
-        </div>
-      )}
+        <Card className="p-4 bg-white border-neutral-200">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-neutral-500 font-medium">Completed</span>
+            <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+          </div>
+          <div className="text-xl font-extrabold text-neutral-900 mt-1">{summary?.completedTasks ?? 0}</div>
+          <div className="text-[11px] text-neutral-400 mt-0.5">Tasks completed</div>
+        </Card>
+      </div>
 
       {/* Tabs & Filters */}
       <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
@@ -269,26 +380,51 @@ export default function TasksPage() {
           </div>
 
           {viewMode === 'TASKS' && (
-            <div className="w-full sm:w-36">
-              <Select
-                value={filterStatus}
-                onChange={(e) => setFilterStatus(e.target.value)}
-                options={[
-                  { value: 'ALL', label: 'All Statuses' },
-                  { value: 'TODO', label: 'To Do' },
-                  { value: 'IN_PROGRESS', label: 'In Progress' },
-                  { value: 'PAUSED', label: 'Paused' },
-                  { value: 'COMPLETED', label: 'Completed' },
-                ]}
-              />
-            </div>
+            <>
+              <div className="w-full sm:w-36">
+                <Select
+                  value={filterStatus}
+                  onChange={(e) => setFilterStatus(e.target.value)}
+                  options={[
+                    { value: 'ALL', label: 'All Statuses' },
+                    { value: 'TODO', label: 'To Do' },
+                    { value: 'IN_PROGRESS', label: 'In Progress' },
+                    { value: 'PAUSED', label: 'Paused' },
+                    { value: 'COMPLETED', label: 'Completed' },
+                  ]}
+                />
+              </div>
+
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setSortOrder((prev) => (prev === 'desc' ? 'asc' : 'desc'))}
+                className="h-9 px-3 text-xs gap-1.5 whitespace-nowrap bg-white border-neutral-300 hover:border-black font-medium"
+                title="Click to toggle sorting by Created Date (Newest / Oldest)"
+              >
+                <span>Created: {sortOrder === 'desc' ? 'Newest' : 'Oldest'}</span>
+                <span className="font-extrabold text-xs">{sortOrder === 'desc' ? '↓' : '↑'}</span>
+              </Button>
+            </>
           )}
         </div>
       </div>
 
-      {/* Loading state */}
-      {isLoading ? (
-        <LoadingState message="Loading work items..." />
+      {/* Loading state / Task View */}
+      {isLoading && tasks.length === 0 ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {[1, 2, 3].map((i) => (
+            <Card key={i} className="p-5 border-neutral-200 bg-white animate-pulse min-h-[200px] flex flex-col justify-between">
+              <div>
+                <div className="h-4 bg-neutral-200 rounded w-1/3 mb-4"></div>
+                <div className="h-5 bg-neutral-200 rounded w-3/4 mb-2"></div>
+                <div className="h-3 bg-neutral-100 rounded w-full mb-2"></div>
+                <div className="h-3 bg-neutral-100 rounded w-2/3"></div>
+              </div>
+              <div className="h-8 bg-neutral-100 rounded w-full mt-4"></div>
+            </Card>
+          ))}
+        </div>
       ) : viewMode === 'TASKS' ? (
         /* TAB 1: Tasks List */
         tasks.length === 0 ? (
@@ -359,8 +495,12 @@ export default function TasksPage() {
                       <p className="text-xs text-neutral-500 mt-2 line-clamp-2 leading-relaxed">{task.description}</p>
                     )}
 
-                    <div className="mt-4 pt-3 border-t border-neutral-100 flex items-center justify-between text-xs text-neutral-400">
-                      <span>{task.dueDate ? `Due: ${formatDate(task.dueDate)}` : 'No due date'}</span>
+                    <div className="mt-4 pt-3 border-t border-neutral-100 flex items-center justify-between text-xs text-neutral-500">
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-neutral-700 font-medium">Created: {formatDate(task.createdAt)}</span>
+                        <span>Assigned: {task.assignedDate || task.startDate ? formatDate(task.assignedDate || task.startDate) : '—'}</span>
+                        <span>Due: {task.dueDate ? formatDate(task.dueDate) : 'No due date'}</span>
+                      </div>
                       <Button
                         variant="ghost"
                         size="sm"
@@ -383,7 +523,7 @@ export default function TasksPage() {
                         <Button
                           size="sm"
                           variant="outline"
-                          onClick={() => pauseTimer(task.id)}
+                          onClick={() => handlePauseTimer(task.id)}
                           className="flex-1 gap-1 text-xs"
                         >
                           <Pause className="w-3.5 h-3.5" /> Pause
@@ -391,7 +531,7 @@ export default function TasksPage() {
                         <Button
                           size="sm"
                           variant="primary"
-                          onClick={() => stopTimer(task.id)}
+                          onClick={() => handleStopTimer(task.id)}
                           className="flex-1 gap-1 text-xs bg-emerald-600 hover:bg-emerald-700"
                         >
                           <Square className="w-3.5 h-3.5" /> Finish
@@ -400,10 +540,10 @@ export default function TasksPage() {
                     ) : (
                       <Button
                         size="sm"
-                        onClick={() => startTimer(task.id)}
+                        onClick={() => handleStartTimer(task.id)}
                         className="w-full gap-1 text-xs"
                       >
-                        <Play className="w-3.5 h-3.5" /> Start Timer
+                        <Play className="w-3.5 h-3.5" /> {task.status === 'PAUSED' || (task.totalDurationSeconds && task.totalDurationSeconds > 0) ? 'Resume Timer' : 'Start Timer'}
                       </Button>
                     )}
                   </div>
@@ -471,9 +611,10 @@ export default function TasksPage() {
                 </div>
 
                 <div className="mt-5 pt-3 border-t border-neutral-100 flex items-center justify-between">
-                  <span className="text-[11px] text-neutral-400">
-                    {proj.dueDate ? `Due: ${formatDate(proj.dueDate)}` : 'No due date'}
-                  </span>
+                  <div className="flex flex-col gap-0.5 text-[11px] text-neutral-500">
+                    <span>Assigned: {proj.assignedDate || proj.startDate ? formatDate(proj.assignedDate || proj.startDate) : '—'}</span>
+                    <span>Due: {proj.dueDate ? formatDate(proj.dueDate) : 'No due date'}</span>
+                  </div>
                   <Button
                     size="sm"
                     variant="outline"
@@ -544,20 +685,30 @@ export default function TasksPage() {
               ]}
             />
             <Input
-              label="Due Date"
-              type="date"
-              value={dueDate}
-              onChange={(e) => setDueDate(e.target.value)}
+              label="Estimated Time (Minutes)"
+              type="number"
+              placeholder="e.g. 60"
+              value={estimatedMinutes}
+              onChange={(e) => setEstimatedMinutes(e.target.value)}
             />
           </div>
 
-          <Input
-            label="Estimated Time (Minutes)"
-            type="number"
-            placeholder="e.g. 60"
-            value={estimatedMinutes}
-            onChange={(e) => setEstimatedMinutes(e.target.value)}
-          />
+          <div className="grid grid-cols-2 gap-3">
+            <Input
+              label="Assigned Date *"
+              type="date"
+              value={assignedDate}
+              onChange={(e) => setAssignedDate(e.target.value)}
+              required
+            />
+            <Input
+              label="Due Date"
+              type="date"
+              value={dueDate}
+              min={assignedDate || undefined}
+              onChange={(e) => setDueDate(e.target.value)}
+            />
+          </div>
 
           <Textarea
             label="Task Description"
@@ -636,6 +787,56 @@ export default function TasksPage() {
             </div>
           </form>
         </div>
+      </Dialog>
+      {/* MODAL: Create Project (Permitted for Limited Admins with PROJECT_CREATE) */}
+      <Dialog
+        isOpen={isProjectCreateOpen}
+        onClose={() => setIsProjectCreateOpen(false)}
+        title="Create New Project"
+        description="Establish a new workspace project and collaborate with team members."
+      >
+        <form onSubmit={handleCreateProject} className="space-y-4">
+          <Input
+            label="Project Name *"
+            placeholder="e.g. Mobile App Redesign"
+            required
+            value={projName}
+            onChange={(e) => setProjName(e.target.value)}
+          />
+
+          <div className="grid grid-cols-2 gap-3">
+            <Input
+              label="Assigned Date *"
+              type="date"
+              value={projAssignedDate}
+              onChange={(e) => setProjAssignedDate(e.target.value)}
+              required
+            />
+            <Input
+              label="Target Due Date"
+              type="date"
+              value={projDueDate}
+              min={projAssignedDate || undefined}
+              onChange={(e) => setProjDueDate(e.target.value)}
+            />
+          </div>
+
+          <Textarea
+            label="Project Description"
+            placeholder="Objectives, deliverables, and scope..."
+            value={projDescription}
+            onChange={(e) => setProjDescription(e.target.value)}
+          />
+
+          <div className="flex items-center justify-end gap-2 pt-3 border-t border-neutral-100">
+            <Button type="button" variant="outline" onClick={() => setIsProjectCreateOpen(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" isLoading={isSubmittingProject} disabled={!projName.trim()}>
+              Create Project
+            </Button>
+          </div>
+        </form>
       </Dialog>
     </div>
   );

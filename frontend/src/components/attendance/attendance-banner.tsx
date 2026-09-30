@@ -12,7 +12,7 @@ export function AttendanceBanner() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [remainingSeconds, setRemainingSeconds] = useState<number>(0);
 
-  const isRestricted = (accessMode === 'RESTRICTED' || session?.attendanceRequired) && user?.role === 'EMPLOYEE';
+  const isRestricted = (accessMode === 'RESTRICTED' || session?.attendanceRequired) && (user?.role !== 'SUPER_ADMIN' && user?.appRole !== 'SUPER_ADMIN');
 
   useEffect(() => {
     if (!isRestricted || !session?.restrictedUntil) return;

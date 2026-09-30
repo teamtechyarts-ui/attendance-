@@ -24,6 +24,7 @@ import { digitalIdRoutes } from './modules/digital-id/digital-id.routes.js';
 import { notificationRoutes } from './modules/notifications/notification.routes.js';
 import { auditRoutes } from './modules/audit/audit.routes.js';
 import { emailRoutes } from './modules/email/email.routes.js';
+import { rbacRoutes } from './modules/rbac/rbac.routes.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
   const app = fastify({
@@ -65,12 +66,32 @@ export async function buildApp(): Promise<FastifyInstance> {
 
   await app.register(cors, {
     origin: (origin, cb) => {
-      // Allow localhost dev and configured CORS origin
-      if (!origin || origin.includes('localhost') || origin === config.corsOrigin) {
+      // Allow requests with no origin (e.g. mobile apps, server-to-server, curl)
+      if (!origin) {
         cb(null, true);
         return;
       }
-      cb(null, true);
+
+      // Check configured CORS origin or web app URL
+      if (origin === config.corsOrigin || origin === config.appWebUrl) {
+        cb(null, true);
+        return;
+      }
+
+      // In local development, allow localhost and 127.0.0.1
+      if (config.nodeEnv !== 'production') {
+        const isLocal =
+          origin.startsWith('http://localhost:') ||
+          origin === 'http://localhost' ||
+          origin.startsWith('http://127.0.0.1:') ||
+          origin === 'http://127.0.0.1';
+        if (isLocal) {
+          cb(null, true);
+          return;
+        }
+      }
+
+      cb(new Error('Not allowed by CORS'), false);
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -128,9 +149,10 @@ export async function buildApp(): Promise<FastifyInstance> {
   // Central Error Handler
   app.setErrorHandler(errorHandler);
 
-  // Health Check Endpoint (Required by spec)
-  app.get('/health', async (request, reply) => {
+  // Health Check Endpoint (Required by spec & Render keep-alive, unauthenticated, exempt from rate limits)
+  app.get('/health', { config: { rateLimit: false } }, async (request, reply) => {
     return reply.send({
+      status: 'ok',
       success: true,
       message: 'API is healthy',
     });
@@ -153,6 +175,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(notificationRoutes, { prefix: '/api/notifications' });
   await app.register(auditRoutes, { prefix: '/api/audit' });
   await app.register(emailRoutes, { prefix: '/api/admin/email' });
+  await app.register(rbacRoutes, { prefix: '/api/rbac' });
 
   return app;
 }

@@ -3,12 +3,38 @@ import { SecurityUtil, TokenPayload } from '../utils/security.js';
 import { prisma } from '../plugins/prisma.js';
 import { DbService } from '../services/db.service.js';
 import { AuthUser, AccessMode } from '../types/index.js';
+import { RbacService } from '../services/rbac.service.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
     user?: AuthUser;
     sessionId?: string;
     accessMode?: AccessMode;
+  }
+}
+
+// High-performance in-memory session cache to eliminate redundant Supabase REST round-trips
+interface CachedAuthSession {
+  sessionId: string;
+  userId: string;
+  authUser: AuthUser;
+  accessMode: AccessMode;
+  expiresAt: Date;
+  cachedAt: number;
+}
+
+const authSessionCache = new Map<string, CachedAuthSession>();
+const AUTH_CACHE_TTL_MS = 30_000; // 30 seconds
+
+export function invalidateAuthSession(sessionId: string) {
+  authSessionCache.delete(sessionId);
+}
+
+export function invalidateUserAuthSessions(userId: string) {
+  for (const [sId, cached] of authSessionCache.entries()) {
+    if (cached.userId === userId) {
+      authSessionCache.delete(sId);
+    }
   }
 }
 
@@ -41,7 +67,39 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
     });
   }
 
-  // 3. Verify active session in PostgreSQL
+  // Check in-memory session cache (eliminates 3 network round-trips per API request)
+  const nowMs = Date.now();
+  const cached = authSessionCache.get(payload.sessionId);
+  if (cached && (nowMs - cached.cachedAt) < AUTH_CACHE_TTL_MS) {
+    if (cached.expiresAt > new Date() && cached.authUser.status === 'ACTIVE') {
+      request.user = cached.authUser;
+      request.sessionId = cached.sessionId;
+      request.accessMode = cached.accessMode;
+
+      // Enforce FIRST_LOGIN_REQUIRED: Block normal routes until password is changed
+      if (request.accessMode === 'FIRST_LOGIN_REQUIRED') {
+        const url = request.url;
+        const isAllowed =
+          url.startsWith('/api/auth/change-password') ||
+          url.startsWith('/api/auth/logout') ||
+          url.startsWith('/api/auth/me');
+        if (!isAllowed) {
+          return reply.status(403).send({
+            success: false,
+            error: {
+              code: 'FIRST_LOGIN_REQUIRED',
+              message: 'Password change required before accessing other resources',
+            },
+          });
+        }
+      }
+      return;
+    } else {
+      authSessionCache.delete(payload.sessionId);
+    }
+  }
+
+  // 3. Verify active session in PostgreSQL / Supabase
   try {
     const session = await DbService.query(
       async () => {
@@ -107,11 +165,17 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
       } catch {}
     }
 
+    // Resolve dynamic RBAC permissions and scoped boundaries
+    const authz = await RbacService.getUserAuthorization(userRecord.id);
+
     // Build standard AuthUser
     const authUser: AuthUser = {
       id: userRecord.id,
       email: userRecord.email,
       role: userRecord.role as any,
+      appRole: authz.appRole,
+      permissions: authz.permissions,
+      scope: authz.scope,
       status: userRecord.status as any,
       employeeId: employee?.id || null,
       employeeCode: employee?.employeeCode || employee?.employee_code || null,
@@ -128,6 +192,16 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
     request.user = authUser;
     request.sessionId = session.id;
     request.accessMode = (session.accessMode || session.access_mode || 'NORMAL') as AccessMode;
+
+    // Cache authenticated session in-memory
+    authSessionCache.set(payload.sessionId, {
+      sessionId: session.id,
+      userId: userRecord.id,
+      authUser,
+      accessMode: request.accessMode,
+      expiresAt: new Date(expiresAt),
+      cachedAt: Date.now(),
+    });
 
     // Enforce FIRST_LOGIN_REQUIRED: Block normal routes until password is changed
     if (request.accessMode === 'FIRST_LOGIN_REQUIRED') {
@@ -168,8 +242,8 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
  * If RESTRICTED, allow ONLY attendance check-in, today status, me, logout.
  */
 export async function requireActiveAttendance(request: FastifyRequest, reply: FastifyReply) {
-  // Admins / Super Admins bypass attendance gating
-  if (request.user?.role === 'SUPER_ADMIN' || request.user?.role === 'ADMIN') {
+  // Only Super Admins bypass attendance gating
+  if (request.user?.role === 'SUPER_ADMIN' || request.user?.appRole === 'SUPER_ADMIN') {
     return;
   }
 

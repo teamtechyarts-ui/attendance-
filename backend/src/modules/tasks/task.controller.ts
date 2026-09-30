@@ -16,9 +16,12 @@ export class TaskController {
       status: query.status,
       priority: query.priority,
       search: query.search,
+      adminView: query.adminView === 'true' || query.adminView === true,
       user: request.user!,
       page: query.page ? parseInt(query.page, 10) : 1,
       limit: query.limit ? parseInt(query.limit, 10) : 50,
+      sortBy: query.sortBy,
+      sortOrder: query.sortOrder,
     });
 
     return reply.send({
@@ -186,10 +189,26 @@ export class TaskController {
     const query = request.query as any;
     const summary = await TaskService.getTimeSummary(request.user!, {
       employeeId: query?.employeeId,
+      period: query?.period,
+      startDate: query?.startDate || query?.from,
+      endDate: query?.endDate || query?.to,
     });
     return reply.send({
       success: true,
       data: summary,
+    });
+  }
+
+  public static async delete(request: FastifyRequest, reply: FastifyReply) {
+    const { id } = request.params as { id: string };
+    const result = await TaskService.deleteTask(id, request.user!, {
+      ipAddress: request.ip,
+      userAgent: request.headers['user-agent'],
+    });
+
+    return reply.send({
+      success: true,
+      data: result,
     });
   }
 }
