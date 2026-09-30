@@ -13,20 +13,22 @@ export class AuthController {
 
     const result = await AuthService.login(body, clientInfo);
 
-    // Set HTTPOnly cookies
-    reply.setCookie('access_token', result.accessToken, {
+    const isProduction = config.nodeEnv === 'production';
+    const cookieOptions = {
       path: '/',
       httpOnly: true,
-      secure: config.nodeEnv === 'production',
-      sameSite: 'lax',
+      secure: isProduction,
+      sameSite: isProduction ? ('none' as const) : ('lax' as const),
+    };
+
+    // Set HTTPOnly cookies
+    reply.setCookie('access_token', result.accessToken, {
+      ...cookieOptions,
       maxAge: 15 * 60, // 15 minutes
     });
 
     reply.setCookie('refresh_token', result.refreshToken, {
-      path: '/',
-      httpOnly: true,
-      secure: config.nodeEnv === 'production',
-      sameSite: 'lax',
+      ...cookieOptions,
       maxAge: 7 * 24 * 60 * 60, // 7 days
     });
 
@@ -44,8 +46,16 @@ export class AuthController {
       });
     }
 
-    reply.clearCookie('access_token', { path: '/' });
-    reply.clearCookie('refresh_token', { path: '/' });
+    const isProduction = config.nodeEnv === 'production';
+    const cookieOptions = {
+      path: '/',
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: isProduction ? ('none' as const) : ('lax' as const),
+    };
+
+    reply.clearCookie('access_token', cookieOptions);
+    reply.clearCookie('refresh_token', cookieOptions);
 
     return reply.send({
       success: true,
@@ -71,19 +81,21 @@ export class AuthController {
       userAgent: request.headers['user-agent'],
     });
 
-    reply.setCookie('access_token', result.accessToken, {
+    const isProduction = config.nodeEnv === 'production';
+    const cookieOptions = {
       path: '/',
       httpOnly: true,
-      secure: config.nodeEnv === 'production',
-      sameSite: 'lax',
+      secure: isProduction,
+      sameSite: isProduction ? ('none' as const) : ('lax' as const),
+    };
+
+    reply.setCookie('access_token', result.accessToken, {
+      ...cookieOptions,
       maxAge: 15 * 60,
     });
 
     reply.setCookie('refresh_token', result.refreshToken, {
-      path: '/',
-      httpOnly: true,
-      secure: config.nodeEnv === 'production',
-      sameSite: 'lax',
+      ...cookieOptions,
       maxAge: 7 * 24 * 60 * 60,
     });
 

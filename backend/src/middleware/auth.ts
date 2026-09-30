@@ -39,6 +39,11 @@ export function invalidateUserAuthSessions(userId: string) {
 }
 
 export async function authenticate(request: FastifyRequest, reply: FastifyReply) {
+  // Preflight OPTIONS requests are handled by CORS and must never hit authentication
+  if (request.method === 'OPTIONS') {
+    return;
+  }
+
   let token: string | undefined;
 
   // 1. Extract from Authorization header
@@ -242,6 +247,10 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
  * If RESTRICTED, allow ONLY attendance check-in, today status, me, logout.
  */
 export async function requireActiveAttendance(request: FastifyRequest, reply: FastifyReply) {
+  if (request.method === 'OPTIONS') {
+    return;
+  }
+
   // Only Super Admins bypass attendance gating
   if (request.user?.role === 'SUPER_ADMIN' || request.user?.appRole === 'SUPER_ADMIN') {
     return;
@@ -274,6 +283,10 @@ export async function requireActiveAttendance(request: FastifyRequest, reply: Fa
  */
 export function requireRole(allowedRoles: string[]) {
   return async (request: FastifyRequest, reply: FastifyReply) => {
+    if (request.method === 'OPTIONS') {
+      return;
+    }
+
     if (!request.user || !allowedRoles.includes(request.user.role)) {
       return reply.status(403).send({
         success: false,

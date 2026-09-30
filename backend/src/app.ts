@@ -59,42 +59,65 @@ export async function buildApp(): Promise<FastifyInstance> {
     }
   });
 
-  // Security Plugins
-  await app.register(helmet, {
-    contentSecurityPolicy: false, // Managed by reverse proxy / frontend
-  });
+  // 1. Register CORS first so that all cross-origin requests & OPTIONS preflights are handled immediately
+  const allowedOriginsSet = new Set<string>(config.allowedOrigins);
+  allowedOriginsSet.add('https://teams.techyarts.com');
+  allowedOriginsSet.add('http://localhost:3000');
 
   await app.register(cors, {
     origin: (origin, cb) => {
-      // Allow requests with no origin (e.g. mobile apps, server-to-server, curl)
+      // Allow requests with no origin (e.g. mobile apps, server-to-server, curl, health checks)
       if (!origin) {
         cb(null, true);
         return;
       }
 
-      // Check configured CORS origin or web app URL
-      if (origin === config.corsOrigin || origin === config.appWebUrl) {
+      const normalizedOrigin = origin.replace(/\/+$/, '');
+
+      // Check against explicit allowlist
+      if (allowedOriginsSet.has(normalizedOrigin)) {
         cb(null, true);
         return;
       }
 
-      // In local development, allow localhost and 127.0.0.1
+      // In local development, allow any localhost and 127.0.0.1 port
       if (config.nodeEnv !== 'production') {
         const isLocal =
-          origin.startsWith('http://localhost:') ||
-          origin === 'http://localhost' ||
-          origin.startsWith('http://127.0.0.1:') ||
-          origin === 'http://127.0.0.1';
+          normalizedOrigin.startsWith('http://localhost:') ||
+          normalizedOrigin === 'http://localhost' ||
+          normalizedOrigin.startsWith('http://127.0.0.1:') ||
+          normalizedOrigin === 'http://127.0.0.1';
         if (isLocal) {
           cb(null, true);
           return;
         }
       }
 
-      cb(new Error('Not allowed by CORS'), false);
+      // Reject origin gracefully without throwing 500 error
+      cb(null, false);
     },
     credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'X-Requested-With',
+      'Accept',
+      'Origin',
+      'Cookie',
+      'Cache-Control',
+      'Pragma',
+    ],
+    exposedHeaders: ['Content-Range', 'X-Content-Range', 'Retry-After'],
+    maxAge: 86400, // 24 hours preflight cache
+    preflight: true,
+    strictPreflight: false,
+  });
+
+  // 2. Security Headers - permit cross-origin resource access for frontend
+  await app.register(helmet, {
+    contentSecurityPolicy: false, // Managed by reverse proxy / frontend
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
   });
 
   await app.register(cookie, {
@@ -102,10 +125,11 @@ export async function buildApp(): Promise<FastifyInstance> {
     hook: 'onRequest',
   });
 
-  // In-Memory Rate Limiting with per-user keying for authenticated sessions
+  // In-Memory Rate Limiting with per-user keying for authenticated sessions; exempt OPTIONS preflights
   await app.register(rateLimit, {
     max: config.nodeEnv === 'production' ? 120 : 3000,
     timeWindow: '1 minute',
+    allowList: (req) => req.method === 'OPTIONS',
     keyGenerator: (request) => {
       // If request has Bearer authorization token, key by user token prefix so each employee/session has their own bucket
       const authHeader = request.headers.authorization;
@@ -113,7 +137,7 @@ export async function buildApp(): Promise<FastifyInstance> {
         return `auth_${authHeader.slice(7, 39)}`;
       }
       // If session cookie exists
-      const sessionCookie = request.cookies?.workos_session;
+      const sessionCookie = request.cookies?.access_token || request.cookies?.workos_session;
       if (sessionCookie) {
         return `cookie_${sessionCookie.slice(0, 32)}`;
       }

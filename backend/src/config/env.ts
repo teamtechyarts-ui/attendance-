@@ -3,10 +3,37 @@ import path from 'path';
 
 dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 
+function parseAllowedOrigins(): string[] {
+  const defaults = ['http://localhost:3000', 'https://teams.techyarts.com'];
+  const envVars = [
+    process.env.CORS_ORIGIN,
+    process.env.ALLOWED_ORIGINS,
+    process.env.APP_WEB_URL,
+    process.env.FRONTEND_URL,
+    process.env.CLIENT_URL,
+  ];
+
+  const origins = new Set<string>(defaults);
+
+  for (const val of envVars) {
+    if (!val) continue;
+    const parts = val.split(',');
+    for (const part of parts) {
+      const trimmed = part.trim().replace(/\/+$/, '');
+      if (trimmed) {
+        origins.add(trimmed);
+      }
+    }
+  }
+
+  return Array.from(origins);
+}
+
 export const config = {
   port: parseInt(process.env.PORT || '4000', 10),
   nodeEnv: process.env.NODE_ENV || 'development',
-  corsOrigin: process.env.CORS_ORIGIN || 'http://localhost:3000',
+  corsOrigin: process.env.CORS_ORIGIN || 'https://teams.techyarts.com',
+  allowedOrigins: parseAllowedOrigins(),
   
   // Database
   databaseUrl: process.env.DATABASE_URL || '',
@@ -40,7 +67,7 @@ export const config = {
   smtpSecure: process.env.SMTP_SECURE === 'true',
   emailFrom: process.env.SMTP_FROM_EMAIL || process.env.EMAIL_FROM || 'notifications@workos.local',
   emailApiKey: process.env.EMAIL_PROVIDER_API_KEY || '',
-  appWebUrl: process.env.APP_WEB_URL || process.env.CORS_ORIGIN || 'http://localhost:3000',
+  appWebUrl: process.env.APP_WEB_URL || process.env.FRONTEND_URL || process.env.CORS_ORIGIN || 'https://teams.techyarts.com',
   googleClientId: process.env.GOOGLE_CLIENT_ID || '',
   googleClientSecret: process.env.GOOGLE_CLIENT_SECRET || '',
   googleRedirectUri: process.env.GOOGLE_REDIRECT_URI || 'http://localhost:4000/api/auth/google/callback',

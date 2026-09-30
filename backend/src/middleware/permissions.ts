@@ -4,6 +4,10 @@ import { RbacService } from '../services/rbac.service.js';
 
 export function requireRoles(...allowedRoles: UserRole[]) {
   return async (request: FastifyRequest, reply: FastifyReply) => {
+    if (request.method === 'OPTIONS') {
+      return;
+    }
+
     if (!request.user) {
       return reply.status(401).send({
         success: false,
@@ -29,6 +33,10 @@ export function requireRoles(...allowedRoles: UserRole[]) {
 
 export function requireSuperAdmin() {
   return async (request: FastifyRequest, reply: FastifyReply) => {
+    if (request.method === 'OPTIONS') {
+      return;
+    }
+
     if (!request.user) {
       return reply.status(401).send({
         success: false,
@@ -64,6 +72,10 @@ export function requirePermission(
   scopeChecker?: (request: FastifyRequest) => Promise<boolean>
 ) {
   return async (request: FastifyRequest, reply: FastifyReply) => {
+    if (request.method === 'OPTIONS') {
+      return;
+    }
+
     const user = request.user;
     if (!user) {
       return reply.status(401).send({
