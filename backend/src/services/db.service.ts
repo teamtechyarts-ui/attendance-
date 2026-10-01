@@ -112,6 +112,9 @@ export class DbService {
       } else if (parsedErr.code === '23503') {
         statusCode = 400;
         errorCode = 'FOREIGN_KEY_VIOLATION';
+      } else if (res.status === 401 || res.status === 403) {
+        statusCode = 500;
+        errorCode = 'DB_AUTH_ERROR';
       }
 
       const error: any = new Error(parsedErr.message || `Supabase REST request failed with status ${res.status}`);

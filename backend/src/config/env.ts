@@ -42,7 +42,7 @@ export const config = {
   // Supabase REST fallback & credentials
   supabaseUrl: process.env.SUPABASE_URL || 'https://vyatjymswwbwsncfimke.supabase.co',
   supabasePublishableKey: process.env.SUPABASE_PUBLISHABLE_KEY || 'sb_publishable_iFl2n8MW_X-tOCKSXrAGaw_wwg_NtgX',
-  supabaseSecretKey: process.env.SUPABASE_SECRET_KEY || 'sb_secret_2V9Nq1HgYwMzYDUUScjmKw_imGi0X3n',
+  supabaseSecretKey: process.env.SUPABASE_SECRET_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZ5YXRqeW1zd3did3NuY2ZpbWtlIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4OTUyOTgyNiwiZXhwIjoyMTA1MTA1ODI2fQ.3n_MwqjNtRCzMMFCf1D8ncxNAOToBg_fSuC32haPbmc',
   supabaseJwksUrl: process.env.SUPABASE_JWKS_URL || 'https://vyatjymswwbwsncfimke.supabase.co/auth/v1/.well-known/jwks.json',
 
   // Security Secrets & Policies
