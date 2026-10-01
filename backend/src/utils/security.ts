@@ -50,10 +50,10 @@ export class SecurityUtil {
   }
 
   /**
-   * Sign Access Token (15m expiration)
+   * Sign Access Token (24h default expiration for continuous workday session)
    */
-  public static generateAccessToken(payload: TokenPayload): string {
-    return jwt.sign(payload, config.jwtAccessSecret, { expiresIn: '15m' });
+  public static generateAccessToken(payload: TokenPayload, expiresIn: string = '24h'): string {
+    return jwt.sign(payload, config.jwtAccessSecret, { expiresIn: expiresIn as any });
   }
 
   /**
@@ -64,11 +64,13 @@ export class SecurityUtil {
   }
 
   /**
-   * Verify Access Token
+   * Verify Access Token with optional expiration bypass for server-authoritative session evaluation
    */
-  public static verifyAccessToken(token: string): TokenPayload | null {
+  public static verifyAccessToken(token: string, options?: { ignoreExpiration?: boolean }): TokenPayload | null {
     try {
-      return jwt.verify(token, config.jwtAccessSecret) as TokenPayload;
+      return jwt.verify(token, config.jwtAccessSecret, {
+        ignoreExpiration: options?.ignoreExpiration ?? false,
+      }) as TokenPayload;
     } catch {
       return null;
     }

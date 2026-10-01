@@ -76,25 +76,44 @@ export default function AdminCalendarPage() {
 
   const handleCreateEvent = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title || !startAt || !endAt) return;
+    if (!title || !startAt) return;
 
     setIsSubmitting(true);
     try {
+      const isHoliday = eventType === 'HOLIDAY';
+      let payloadStart: string;
+      let payloadEnd: string;
+      let isAllDay = isHoliday;
+
+      if (isHoliday) {
+        const dStr = startAt.slice(0, 10);
+        payloadStart = `${dStr}T00:00:00.000Z`;
+        payloadEnd = `${dStr}T23:59:59.999Z`;
+        isAllDay = true;
+      } else {
+        const startDt = new Date(startAt);
+        const endDt = endAt ? new Date(endAt) : startDt;
+        payloadStart = isNaN(startDt.getTime()) ? startAt : startDt.toISOString();
+        payloadEnd = isNaN(endDt.getTime()) ? (endAt || startAt) : endDt.toISOString();
+      }
+
       await calendarApi.createEvent({
         title,
         description: description || null,
         eventType,
         visibility,
         attendeeIds: visibility === 'SPECIFIC' ? selectedAttendeeIds : undefined,
-        startAt: new Date(startAt).toISOString(),
-        endAt: new Date(endAt).toISOString(),
-        allDay: false,
+        startAt: payloadStart,
+        endAt: payloadEnd,
+        allDay: isAllDay,
       });
       setIsModalOpen(false);
       setTitle('');
       setDescription('');
       setSelectedAttendeeIds([]);
       setVisibility('EVERYONE');
+      setStartAt('');
+      setEndAt('');
       fetchEvents();
     } catch (err: any) {
       alert(err.message || 'Failed to create event');
@@ -112,6 +131,23 @@ export default function AdminCalendarPage() {
     } catch (err: any) {
       alert(err.message || 'Failed to delete event');
     }
+  };
+
+  const getEventDateStr = (ev: any): string => {
+    const raw = ev.startAt || ev.start_at;
+    if (!raw) return '';
+    if (ev.allDay || ev.all_day || ev.eventType === 'HOLIDAY' || ev.event_type === 'HOLIDAY') {
+      return typeof raw === 'string' ? raw.slice(0, 10) : new Date(raw).toISOString().slice(0, 10);
+    }
+    const dt = new Date(raw);
+    if (isNaN(dt.getTime())) return '';
+    return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+  };
+
+  const getHolidayDateStr = (h: any): string => {
+    const raw = h.holidayDate || h.holiday_date;
+    if (!raw) return '';
+    return typeof raw === 'string' ? raw.slice(0, 10) : new Date(raw).toISOString().slice(0, 10);
   };
 
   const daysInMonth = new Date(year, month, 0).getDate();
@@ -162,9 +198,9 @@ export default function AdminCalendarPage() {
 
               {days.map((d) => {
                 const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-                const isHoliday = data.holidays?.find((h: any) => h.holidayDate?.startsWith(dateStr) || h.holiday_date?.startsWith(dateStr));
-                const dayEvents = data.events?.filter((e: any) => e.startAt?.startsWith(dateStr) || e.start_at?.startsWith(dateStr));
-                const dayTasks = data.tasks?.filter((t: any) => t.startDate?.startsWith(dateStr) || t.dueDate?.startsWith(dateStr));
+                const isHoliday = data.holidays?.find((h: any) => getHolidayDateStr(h) === dateStr);
+                const dayEvents = data.events?.filter((e: any) => getEventDateStr(e) === dateStr);
+                const dayTasks = data.tasks?.filter((t: any) => (t.startDate?.slice(0, 10) === dateStr || t.dueDate?.slice(0, 10) === dateStr));
 
                 return (
                   <div
@@ -278,22 +314,37 @@ export default function AdminCalendarPage() {
             </div>
           )}
 
-          <div className="grid grid-cols-2 gap-3">
-            <Input
-              label="Start Date & Time *"
-              type="datetime-local"
-              required
-              value={startAt}
-              onChange={(e) => setStartAt(e.target.value)}
-            />
-            <Input
-              label="End Date & Time *"
-              type="datetime-local"
-              required
-              value={endAt}
-              onChange={(e) => setEndAt(e.target.value)}
-            />
-          </div>
+          {eventType === 'HOLIDAY' ? (
+            <div className="space-y-1">
+              <Input
+                label="Holiday Date *"
+                type="date"
+                required
+                value={startAt}
+                onChange={(e) => {
+                  setStartAt(e.target.value);
+                  setEndAt(e.target.value);
+                }}
+              />
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 gap-3">
+              <Input
+                label="Start Date & Time *"
+                type="datetime-local"
+                required
+                value={startAt}
+                onChange={(e) => setStartAt(e.target.value)}
+              />
+              <Input
+                label="End Date & Time *"
+                type="datetime-local"
+                required
+                value={endAt}
+                onChange={(e) => setEndAt(e.target.value)}
+              />
+            </div>
+          )}
 
           <Textarea
             label="Description"

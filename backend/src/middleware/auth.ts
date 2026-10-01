@@ -1,5 +1,6 @@
 import { FastifyReply, FastifyRequest } from 'fastify';
 import { SecurityUtil, TokenPayload } from '../utils/security.js';
+import { DateTimeUtil } from '../utils/datetime.js';
 import { prisma } from '../plugins/prisma.js';
 import { DbService } from '../services/db.service.js';
 import { AuthUser, AccessMode } from '../types/index.js';
@@ -21,6 +22,7 @@ interface CachedAuthSession {
   accessMode: AccessMode;
   expiresAt: Date;
   cachedAt: number;
+  isActiveWorkSession: boolean;
 }
 
 const authSessionCache = new Map<string, CachedAuthSession>();
@@ -64,19 +66,32 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
     });
   }
 
-  const payload = SecurityUtil.verifyAccessToken(token);
+  // Verify access token signature (allowing valid signature evaluation for active work sessions)
+  let payload = SecurityUtil.verifyAccessToken(token);
   if (!payload) {
-    return reply.status(401).send({
-      success: false,
-      error: { code: 'TOKEN_EXPIRED', message: 'Access token expired or invalid' },
-    });
+    payload = SecurityUtil.verifyAccessToken(token, { ignoreExpiration: true });
+    if (!payload) {
+      return reply.status(401).send({
+        success: false,
+        error: { code: 'TOKEN_EXPIRED', message: 'Access token expired or invalid' },
+      });
+    }
   }
 
-  // Check in-memory session cache (eliminates 3 network round-trips per API request)
+  // Check in-memory session cache (eliminates redundant round-trips per API request)
   const nowMs = Date.now();
   const cached = authSessionCache.get(payload.sessionId);
   if (cached && (nowMs - cached.cachedAt) < AUTH_CACHE_TTL_MS) {
-    if (cached.expiresAt > new Date() && cached.authUser.status === 'ACTIVE') {
+    const isCacheSessionValid =
+      cached.authUser.status === 'ACTIVE' &&
+      (
+        cached.isActiveWorkSession ||
+        cached.authUser.role === 'SUPER_ADMIN' ||
+        cached.authUser.appRole === 'SUPER_ADMIN' ||
+        (cached.expiresAt && cached.expiresAt > new Date())
+      );
+
+    if (isCacheSessionValid) {
       request.user = cached.authUser;
       request.sessionId = cached.sessionId;
       request.accessMode = cached.accessMode;
@@ -130,20 +145,27 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
       }
     );
 
-    const isRevoked = Boolean(session.revokedAt || session.revoked_at);
-    const expiresAt = session.expiresAt || session.expires_at;
-    const isExpired = expiresAt ? new Date(expiresAt) < new Date() : false;
-
-    if (!session || isRevoked || isExpired) {
+    if (!session) {
+      console.warn(`[AUTH] SESSION_REJECTED: Session ${payload.sessionId} not found`);
       return reply.status(401).send({
         success: false,
         error: { code: 'SESSION_INVALID', message: 'Session has expired or was revoked' },
       });
     }
 
+    const isRevoked = Boolean(session.revokedAt || session.revoked_at);
+    if (isRevoked) {
+      console.warn(`[AUTH] SESSION_REJECTED: Session ${payload.sessionId} has been revoked`);
+      return reply.status(401).send({
+        success: false,
+        error: { code: 'SESSION_REVOKED', message: 'Session has expired or was revoked' },
+      });
+    }
+
     const userRecord = session.user;
     const userStatus = userRecord?.status;
     if (!userRecord || (userStatus && userStatus !== 'ACTIVE')) {
+      console.warn(`[AUTH] SESSION_REJECTED: User ${userRecord?.id} is inactive or suspended`);
       return reply.status(403).send({
         success: false,
         error: { code: 'ACCOUNT_INACTIVE', message: 'Your account is inactive or suspended' },
@@ -172,6 +194,72 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
 
     // Resolve dynamic RBAC permissions and scoped boundaries
     const authz = await RbacService.getUserAuthorization(userRecord.id);
+    const isSuperAdmin = userRecord.role === 'SUPER_ADMIN' || authz.appRole === 'SUPER_ADMIN';
+    let currentAccessMode = (session.accessMode || session.access_mode || 'NORMAL') as AccessMode;
+
+    // Check active attendance work-session state
+    const todayStr = DateTimeUtil.getTodayDateString();
+    let todayAttendance: any = null;
+    let isActiveWorkSession = false;
+
+    if (employee?.id) {
+      todayAttendance = await DbService.query(
+        async () => prisma.attendance.findUnique({
+          where: {
+            employeeId_attendanceDate: {
+              employeeId: employee.id,
+              attendanceDate: new Date(todayStr),
+            },
+          },
+        }),
+        async () => {
+          const res = await DbService.restRequest<any[]>(
+            `/attendance?employee_id=eq.${employee.id}&attendance_date=eq.${todayStr}`
+          );
+          return res?.[0] || null;
+        }
+      );
+
+      const checkInAt = todayAttendance ? (todayAttendance.checkInAt || todayAttendance.check_in_at) : null;
+      const checkOutAt = todayAttendance ? (todayAttendance.checkOutAt || todayAttendance.check_out_at) : null;
+
+      // Active work session: employee has checked in today and has not checked out yet, and session is NORMAL
+      if (checkInAt && !checkOutAt) {
+        isActiveWorkSession = true;
+        if (currentAccessMode === 'RESTRICTED') {
+          currentAccessMode = 'NORMAL';
+        }
+      }
+    }
+
+    // Evaluate Session Validity
+    const expiresAt = session.expiresAt || session.expires_at;
+    const isTimeExpired = expiresAt ? new Date(expiresAt) < new Date() : false;
+
+    if (currentAccessMode === 'RESTRICTED') {
+      const restrictedUntil = session.restrictedUntil || session.restricted_until;
+      const isRestrictedExpired = restrictedUntil ? new Date(restrictedUntil) < new Date() : false;
+      if (isRestrictedExpired) {
+        console.warn(`[AUTH] SESSION_REJECTED: Restricted pre-attendance session ${session.id} expired`);
+        return reply.status(403).send({
+          success: false,
+          error: {
+            code: 'ATTENDANCE_REQUIRED',
+            message: 'Attendance must be marked before accessing this feature.',
+          },
+        });
+      }
+    } else if (!isActiveWorkSession && !isSuperAdmin && isTimeExpired) {
+      console.warn(`[AUTH] SESSION_REJECTED: Session ${session.id} has expired`);
+      return reply.status(401).send({
+        success: false,
+        error: { code: 'SESSION_INVALID', message: 'Session has expired' },
+      });
+    }
+
+    if (isActiveWorkSession && process.env.NODE_ENV !== 'production') {
+      console.log(`[AUTH] AUTH_WORK_SESSION_ACTIVE: userId=${userRecord.id}, sessionId=${session.id}`);
+    }
 
     // Build standard AuthUser
     const authUser: AuthUser = {
@@ -196,16 +284,17 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
 
     request.user = authUser;
     request.sessionId = session.id;
-    request.accessMode = (session.accessMode || session.access_mode || 'NORMAL') as AccessMode;
+    request.accessMode = currentAccessMode;
 
     // Cache authenticated session in-memory
     authSessionCache.set(payload.sessionId, {
       sessionId: session.id,
       userId: userRecord.id,
       authUser,
-      accessMode: request.accessMode,
-      expiresAt: new Date(expiresAt),
+      accessMode: currentAccessMode,
+      expiresAt: new Date(expiresAt || Date.now() + 7 * 24 * 3600 * 1000),
       cachedAt: Date.now(),
+      isActiveWorkSession,
     });
 
     // Enforce FIRST_LOGIN_REQUIRED: Block normal routes until password is changed
@@ -239,7 +328,6 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
     });
   }
 }
-
 
 /**
  * Attendance-gated access enforcement middleware

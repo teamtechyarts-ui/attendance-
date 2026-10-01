@@ -143,9 +143,7 @@ export class AttendanceService {
             },
           });
 
-          if (process.env.NODE_ENV !== 'production') {
-            console.log(`[AttendanceService] checkIn: userId=${userId}, employeeId=${employeeId}, date=${todayStr}, attendanceId=${attendance.id}, status=${status}`);
-          }
+          console.log(`[AUTH] AUTH_WORK_SESSION_UPGRADED: userId=${userId}, sessionId=${sessionId}, attendanceId=${attendance.id}, timestamp=${now.toISOString()}`);
 
           await AuditService.log({
             userId,
@@ -242,9 +240,7 @@ export class AttendanceService {
           },
         });
 
-        if (process.env.NODE_ENV !== 'production') {
-          console.log(`[AttendanceService] checkIn (REST): userId=${userId}, employeeId=${employeeId}, date=${todayStr}, attendanceId=${attendance.id}, status=${status}`);
-        }
+          console.log(`[AUTH] AUTH_WORK_SESSION_UPGRADED: userId=${userId}, sessionId=${sessionId}, attendanceId=${attendance.id}, timestamp=${now.toISOString()}`);
 
         await AuditService.log({
           userId,
@@ -394,9 +390,7 @@ export class AttendanceService {
             },
           });
 
-          if (process.env.NODE_ENV !== 'production') {
-            console.log(`[AttendanceService] checkOut: userId=${userId}, employeeId=${employeeId}, date=${todayStr}, attendanceId=${attendance.id}, totalWorkMinutes=${totalWorkMinutes}, timersAutoStopped=${timersAutoStopped}`);
-          }
+          console.log(`[AUTH] AUTH_WORK_SESSION_ENDED: userId=${userId}, employeeId=${employeeId}, attendanceId=${attendance.id}, totalWorkMinutes=${totalWorkMinutes}, timestamp=${now.toISOString()}`);
 
           await AuditService.log({
             userId,
@@ -522,9 +516,7 @@ export class AttendanceService {
           },
         });
 
-        if (process.env.NODE_ENV !== 'production') {
-          console.log(`[AttendanceService] checkOut (REST): userId=${userId}, employeeId=${employeeId}, date=${todayStr}, attendanceId=${attendance.id}, totalWorkMinutes=${totalWorkMinutes}, timersAutoStopped=${timersAutoStopped}`);
-        }
+        console.log(`[AUTH] AUTH_WORK_SESSION_ENDED: userId=${userId}, employeeId=${employeeId}, attendanceId=${attendance.id}, totalWorkMinutes=${totalWorkMinutes}, timestamp=${now.toISOString()}`);
 
         await AuditService.log({
           userId,
@@ -991,32 +983,93 @@ export class AttendanceService {
     }
 
     const todayStr = DateTimeUtil.getTodayDateString();
+    const [currYearStr, currMonthStr] = todayStr.split('-');
+    const currYear = parseInt(currYearStr, 10);
+    const currMonth = parseInt(currMonthStr, 10);
 
-    // Determine Date Range
+    // Determine Date Range based on business today
     let startStr: string;
     let endStr: string;
     let isSpecificDate = false;
 
     if (date && DateTimeUtil.isValidDateString(date)) {
+      if (date > todayStr) {
+        // Single date in future -> return empty history
+        return {
+          records: [],
+          summary: {
+            totalDays: 0,
+            workingDays: 0,
+            present: 0,
+            late: 0,
+            halfDay: 0,
+            absent: 0,
+            leave: 0,
+            holidays: 0,
+            offDays: 0,
+          },
+        };
+      }
       startStr = date;
       endStr = date;
       isSpecificDate = true;
     } else if (year && month) {
+      if (year > currYear || (year === currYear && month > currMonth)) {
+        // Future month -> return empty history
+        return {
+          records: [],
+          summary: {
+            totalDays: 0,
+            workingDays: 0,
+            present: 0,
+            late: 0,
+            halfDay: 0,
+            absent: 0,
+            leave: 0,
+            holidays: 0,
+            offDays: 0,
+          },
+        };
+      }
       const range = DateTimeUtil.getMonthDateRange(year, month);
       startStr = range.startStr;
-      endStr = range.endStr;
+      if (year === currYear && month === currMonth) {
+        // Current month: stop strictly at business today
+        endStr = todayStr;
+      } else {
+        // Past month: full month
+        endStr = range.endStr;
+      }
     } else if (year) {
+      if (year > currYear) {
+        // Future year -> return empty history
+        return {
+          records: [],
+          summary: {
+            totalDays: 0,
+            workingDays: 0,
+            present: 0,
+            late: 0,
+            halfDay: 0,
+            absent: 0,
+            leave: 0,
+            holidays: 0,
+            offDays: 0,
+          },
+        };
+      }
       const range = DateTimeUtil.getYearDateRange(year);
       startStr = range.startStr;
-      endStr = range.endStr;
+      if (year === currYear) {
+        endStr = todayStr;
+      } else {
+        endStr = range.endStr;
+      }
     } else {
-      // Default: Current Month
-      const [yStr, mStr] = todayStr.split('-');
-      const currYear = parseInt(yStr, 10);
-      const currMonth = parseInt(mStr, 10);
+      // Default: Current Month -> from 1st to business today
       const range = DateTimeUtil.getMonthDateRange(currYear, currMonth);
       startStr = range.startStr;
-      endStr = range.endStr;
+      endStr = todayStr;
     }
 
     const startObj = new Date(startStr);
@@ -1107,7 +1160,6 @@ export class AttendanceService {
           if (dStr) {
             attMap.get(a.employeeId)!.set(dStr, a);
           }
-
         }
 
         // Leave Map: empId -> list of approved requests
@@ -1117,7 +1169,7 @@ export class AttendanceService {
           leaveMap.get(l.employeeId)!.push(l);
         }
 
-        // 3. Build Calendar Dates List
+        // 3. Build Calendar Dates List (historical up to today only)
         const dateStrings: string[] = [];
         let curr = new Date(startObj);
         while (curr <= endObj) {
@@ -1153,37 +1205,21 @@ export class AttendanceService {
               return Boolean(lStart && lEnd && dateStr >= lStart && dateStr <= lEnd);
             });
 
-
-            // Authoritative Status Resolution
-            let status: AttendanceStatus | 'LEAVE' | 'OFF' | 'UPCOMING';
-            const isFuture = dateStr > todayStr;
-
-            if (isFuture) {
-              if (evalResult.isHoliday) {
-                status = 'HOLIDAY';
-              } else if (!evalResult.isWorkingDay) {
-                status = 'OFF';
-              } else if (matchingLeave) {
-                status = 'LEAVE';
-              } else {
-                status = 'UPCOMING';
-              }
+            // Authoritative Status Resolution (Only historical & today records exist)
+            let status: AttendanceStatus | 'LEAVE' | 'OFF';
+            if (evalResult.isHoliday) {
+              status = att?.checkInAt ? (att.status as AttendanceStatus) : 'HOLIDAY';
+            } else if (!evalResult.isWorkingDay) {
+              status = att?.checkInAt ? (att.status as AttendanceStatus) : 'OFF';
+            } else if (matchingLeave) {
+              status = 'LEAVE';
+            } else if (att?.checkInAt) {
+              status = att.status as AttendanceStatus;
             } else {
-              // Today or Past Date
-              if (evalResult.isHoliday) {
-                status = att?.checkInAt ? (att.status as AttendanceStatus) : 'HOLIDAY';
-              } else if (!evalResult.isWorkingDay) {
-                status = att?.checkInAt ? (att.status as AttendanceStatus) : 'OFF';
-              } else if (matchingLeave) {
-                status = 'LEAVE';
-              } else if (att?.checkInAt) {
-                status = att.status as AttendanceStatus;
-              } else {
-                status = 'ABSENT';
-              }
+              status = 'ABSENT';
             }
 
-            // Reconcile Summary Totals (only for single employee or aggregate)
+            // Reconcile Summary Totals
             if (evalResult.isHoliday) {
               summaryHolidays++;
             } else if (!evalResult.isWorkingDay) {
@@ -1203,7 +1239,6 @@ export class AttendanceService {
             } else if (status === 'LEAVE') {
               summaryLeave++;
             }
-
 
             const record = {
               id: att?.id || `calendar-${emp.id}-${dateStr}`,
@@ -1303,7 +1338,6 @@ export class AttendanceService {
           endStr
         );
 
-
         const attMap = new Map<string, Map<string, any>>();
         for (const a of rawAttendances || []) {
           const empId = a.employeeId || a.employee_id;
@@ -1358,27 +1392,17 @@ export class AttendanceService {
               return Boolean(lStart && lEnd && dateStr >= lStart && dateStr <= lEnd);
             });
 
-
-            let status: AttendanceStatus | 'LEAVE' | 'OFF' | 'UPCOMING';
-            const isFuture = dateStr > todayStr;
-
-            if (isFuture) {
-              if (evalResult.isHoliday) status = 'HOLIDAY';
-              else if (!evalResult.isWorkingDay) status = 'OFF';
-              else if (matchingLeave) status = 'LEAVE';
-              else status = 'UPCOMING';
+            let status: AttendanceStatus | 'LEAVE' | 'OFF';
+            if (evalResult.isHoliday) {
+              status = att?.checkInAt ? att.status : 'HOLIDAY';
+            } else if (!evalResult.isWorkingDay) {
+              status = att?.checkInAt ? att.status : 'OFF';
+            } else if (matchingLeave) {
+              status = 'LEAVE';
+            } else if (att?.checkInAt) {
+              status = att.status;
             } else {
-              if (evalResult.isHoliday) {
-                status = att?.checkInAt ? att.status : 'HOLIDAY';
-              } else if (!evalResult.isWorkingDay) {
-                status = att?.checkInAt ? att.status : 'OFF';
-              } else if (matchingLeave) {
-                status = 'LEAVE';
-              } else if (att?.checkInAt) {
-                status = att.status;
-              } else {
-                status = 'ABSENT';
-              }
+              status = 'ABSENT';
             }
 
             if (evalResult.isHoliday) {
@@ -1400,7 +1424,6 @@ export class AttendanceService {
             } else if (status === 'LEAVE') {
               summaryLeave++;
             }
-
 
             allRecords.push({
               id: att?.id || `calendar-${emp.id}-${dateStr}`,

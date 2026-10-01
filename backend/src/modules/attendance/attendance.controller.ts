@@ -3,6 +3,8 @@ import { AttendanceService } from './attendance.service.js';
 import { RbacService } from '../../services/rbac.service.js';
 import { DbService } from '../../services/db.service.js';
 import { prisma } from '../../plugins/prisma.js';
+import { SecurityUtil } from '../../utils/security.js';
+import { config } from '../../config/env.js';
 import { checkInSchema, checkOutSchema, attendanceHistoryQuerySchema } from '../../validation/index.js';
 
 
@@ -42,9 +44,41 @@ export class AttendanceController {
       }
     );
 
+    // Refresh cookies with upgraded NORMAL access token & session payload
+    const tokenPayload = {
+      userId: request.user.id,
+      sessionId: request.sessionId,
+      role: request.user.role,
+      accessMode: 'NORMAL' as const,
+    };
+    const accessToken = SecurityUtil.generateAccessToken(tokenPayload);
+    const refreshToken = SecurityUtil.generateRefreshToken(tokenPayload);
+
+    const isProduction = config.nodeEnv === 'production';
+    const cookieOptions = {
+      path: '/',
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: isProduction ? ('none' as const) : ('lax' as const),
+    };
+
+    reply.setCookie('access_token', accessToken, {
+      ...cookieOptions,
+      maxAge: 24 * 60 * 60, // 24 hours
+    });
+
+    reply.setCookie('refresh_token', refreshToken, {
+      ...cookieOptions,
+      maxAge: 7 * 24 * 60 * 60, // 7 days
+    });
+
     return reply.status(201).send({
       success: true,
-      data,
+      data: {
+        ...data,
+        accessToken,
+        refreshToken,
+      },
     });
   }
 

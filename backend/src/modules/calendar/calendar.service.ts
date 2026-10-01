@@ -359,6 +359,24 @@ export class CalendarService {
       }
     }
 
+    const isHoliday = input.eventType === 'HOLIDAY';
+    let eventStartAt = new Date(input.startAt);
+    let eventEndAt = new Date(input.endAt);
+    let isAllDay = input.allDay || isHoliday;
+    let holidayDateStr = '';
+
+    if (isHoliday) {
+      holidayDateStr = typeof input.startAt === 'string' ? input.startAt.slice(0, 10) : new Date(input.startAt).toISOString().slice(0, 10);
+      eventStartAt = new Date(`${holidayDateStr}T00:00:00.000Z`);
+      eventEndAt = new Date(`${holidayDateStr}T23:59:59.999Z`);
+      isAllDay = true;
+    } else if (input.allDay) {
+      const startDayStr = typeof input.startAt === 'string' ? input.startAt.slice(0, 10) : new Date(input.startAt).toISOString().slice(0, 10);
+      const endDayStr = typeof input.endAt === 'string' ? input.endAt.slice(0, 10) : new Date(input.endAt).toISOString().slice(0, 10);
+      eventStartAt = new Date(`${startDayStr}T00:00:00.000Z`);
+      eventEndAt = new Date(`${endDayStr}T23:59:59.999Z`);
+    }
+
     const created = await DbService.query(
       async () => {
         const event = await prisma.calendarEvent.create({
@@ -367,13 +385,40 @@ export class CalendarService {
             description: input.description || null,
             eventType: input.eventType || 'OTHER',
             visibility,
-            startAt: new Date(input.startAt),
-            endAt: new Date(input.endAt),
-            allDay: input.allDay || false,
+            startAt: eventStartAt,
+            endAt: eventEndAt,
+            allDay: isAllDay,
             createdBy: user.id,
             employeeId: input.employeeId || (input.attendeeIds && input.attendeeIds.length === 1 ? input.attendeeIds[0] : null),
           },
         });
+
+        // If event is HOLIDAY, synchronize to holidays table for attendance & work schedule recognition
+        if (isHoliday && holidayDateStr) {
+          try {
+            const holDate = new Date(`${holidayDateStr}T00:00:00.000Z`);
+            const existingHol = await prisma.holiday.findFirst({
+              where: { holidayDate: holDate },
+            });
+            if (existingHol) {
+              await prisma.holiday.update({
+                where: { id: existingHol.id },
+                data: { name: input.title, description: input.description || null },
+              });
+            } else {
+              await prisma.holiday.create({
+                data: {
+                  name: input.title,
+                  description: input.description || null,
+                  holidayDate: holDate,
+                  isOptional: false,
+                },
+              });
+            }
+          } catch (hErr: any) {
+            console.error('[CalendarService] Failed to synchronize holiday record:', hErr.message);
+          }
+        }
 
         // If specific attendees provided, add them to calendar_event_attendees
         if (visibility === 'SPECIFIC' && input.attendeeIds && Array.isArray(input.attendeeIds)) {
@@ -420,9 +465,9 @@ export class CalendarService {
               description: input.description || null,
               event_type: input.eventType || 'OTHER',
               visibility,
-              start_at: input.startAt,
-              end_at: input.endAt,
-              all_day: input.allDay || false,
+              start_at: eventStartAt.toISOString(),
+              end_at: eventEndAt.toISOString(),
+              all_day: isAllDay,
               created_by: user.id,
               employee_id: input.employeeId || (input.attendeeIds && input.attendeeIds.length === 1 ? input.attendeeIds[0] : null),
             },
@@ -436,13 +481,37 @@ export class CalendarService {
               title: input.title,
               description: input.description || null,
               event_type: input.eventType || 'OTHER',
-              start_at: input.startAt,
-              end_at: input.endAt,
-              all_day: input.allDay || false,
+              start_at: eventStartAt.toISOString(),
+              end_at: eventEndAt.toISOString(),
+              all_day: isAllDay,
               created_by: user.id,
               employee_id: input.employeeId || (input.attendeeIds && input.attendeeIds.length === 1 ? input.attendeeIds[0] : null),
             },
           });
+        }
+
+        // Synchronize holiday in REST fallback
+        if (isHoliday && holidayDateStr) {
+          try {
+            const existingHols = await DbService.restRequest<any[]>(`/holidays?holiday_date=eq.${holidayDateStr}`);
+            if (existingHols && existingHols.length > 0) {
+              await DbService.restRequest(`/holidays?id=eq.${existingHols[0].id}`, {
+                method: 'PATCH',
+                body: { name: input.title, description: input.description || null },
+              });
+            } else {
+              await DbService.restRequest('/holidays', {
+                method: 'POST',
+                body: {
+                  id: randomUUID(),
+                  name: input.title,
+                  description: input.description || null,
+                  holiday_date: holidayDateStr,
+                  is_optional: false,
+                },
+              });
+            }
+          } catch {}
         }
 
         const createdEvent = events[0] || {
@@ -451,9 +520,9 @@ export class CalendarService {
           description: input.description || null,
           eventType: input.eventType || 'OTHER',
           visibility,
-          startAt: input.startAt,
-          endAt: input.endAt,
-          allDay: input.allDay || false,
+          startAt: eventStartAt.toISOString(),
+          endAt: eventEndAt.toISOString(),
+          allDay: isAllDay,
           createdBy: user.id,
           employeeId: input.employeeId || null,
           createdAt: now,
@@ -695,10 +764,33 @@ export class CalendarService {
           throw err;
         }
 
+        if (existing.eventType === 'HOLIDAY') {
+          try {
+            const rawStart = existing.startAt;
+            const dateStr = rawStart instanceof Date ? rawStart.toISOString().slice(0, 10) : typeof rawStart === 'string' ? (rawStart as string).slice(0, 10) : new Date(rawStart as any).toISOString().slice(0, 10);
+            if (dateStr) {
+              const holDate = new Date(`${dateStr}T00:00:00.000Z`);
+              await prisma.holiday.deleteMany({ where: { holidayDate: holDate } });
+            }
+          } catch {}
+        }
+
         await prisma.calendarEvent.delete({ where: { id } });
         return { success: true, message: 'Calendar event deleted successfully' };
       },
       async () => {
+        try {
+          const evs = await DbService.restRequest<any[]>(`/calendar_events?id=eq.${id}`);
+          const ev = evs?.[0];
+          if (ev && (ev.eventType === 'HOLIDAY' || ev.event_type === 'HOLIDAY')) {
+            const rawStart = ev.startAt || ev.start_at;
+            const dateStr = typeof rawStart === 'string' ? rawStart.slice(0, 10) : new Date(rawStart).toISOString().slice(0, 10);
+            if (dateStr) {
+              await DbService.restRequest(`/holidays?holiday_date=eq.${dateStr}`, { method: 'DELETE' });
+            }
+          }
+        } catch {}
+
         await DbService.restRequest(`/calendar_events?id=eq.${id}`, {
           method: 'DELETE',
         });

@@ -22,7 +22,8 @@ export class WorkdayService {
     return DbService.query(
       async () => {
         // 1. Check if date is a holiday
-        const dateObj = new Date(dateString);
+        const cleanDateStr = dateString.slice(0, 10);
+        const dateObj = new Date(`${cleanDateStr}T00:00:00.000Z`);
         const holiday = await prisma.holiday.findFirst({
           where: { holidayDate: dateObj },
         });

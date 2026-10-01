@@ -11,7 +11,8 @@ describe('Attendance Date/Month/Year Filtering & Validation Test Suite', () => {
   let pavanDisplayName: string = 'Pavan Amirishetty';
 
   before(async () => {
-    const allRecords = await AttendanceService.getHistory();
+    const historyRes = await AttendanceService.getHistory({ adminView: true });
+    const allRecords = historyRes.records || [];
     const pavanRecord = allRecords.find((r: any) => {
       const name = r.employee?.displayName || r.employee?.first_name || '';
       return name.toLowerCase().includes('pavan');
@@ -80,14 +81,16 @@ describe('Attendance Date/Month/Year Filtering & Validation Test Suite', () => {
   // 2. Database Filter Queries
   describe('Database Attendance Filtering Combinations', () => {
     test('1. All Employees + All Dates', async () => {
-      const records = await AttendanceService.getHistory();
+      const res = await AttendanceService.getHistory({ adminView: true });
+      const records = res.records;
       assert.ok(Array.isArray(records));
       assert.ok(records.length > 0, 'Should return attendance records');
       console.log(`[Test 1] All Employees + All Dates count: ${records.length}`);
     });
 
     test('2. All Employees + Specific Date (2026-09-19)', async () => {
-      const records = await AttendanceService.getHistory({ date: '2026-09-19' });
+      const res = await AttendanceService.getHistory({ adminView: true, date: '2026-09-19' });
+      const records = res.records;
       assert.ok(Array.isArray(records));
       for (const r of records) {
         const dStr = r.attendanceDate instanceof Date ? r.attendanceDate.toISOString().slice(0, 10) : String(r.attendanceDate).slice(0, 10);
@@ -97,7 +100,8 @@ describe('Attendance Date/Month/Year Filtering & Validation Test Suite', () => {
     });
 
     test('2b. All Employees + Specific Date (2026-09-18)', async () => {
-      const records = await AttendanceService.getHistory({ date: '2026-09-18' });
+      const res = await AttendanceService.getHistory({ adminView: true, date: '2026-09-18' });
+      const records = res.records;
       assert.ok(Array.isArray(records));
       for (const r of records) {
         const dStr = r.attendanceDate instanceof Date ? r.attendanceDate.toISOString().slice(0, 10) : String(r.attendanceDate).slice(0, 10);
@@ -107,7 +111,8 @@ describe('Attendance Date/Month/Year Filtering & Validation Test Suite', () => {
     });
 
     test('3. All Employees + Month (September 2026)', async () => {
-      const records = await AttendanceService.getHistory({ year: 2026, month: 9 });
+      const res = await AttendanceService.getHistory({ adminView: true, year: 2026, month: 9 });
+      const records = res.records;
       assert.ok(Array.isArray(records));
       assert.ok(records.length >= 2, 'Should include records from both Sept 18 and Sept 19');
       for (const r of records) {
@@ -119,7 +124,8 @@ describe('Attendance Date/Month/Year Filtering & Validation Test Suite', () => {
     });
 
     test('4. All Employees + Year (2026)', async () => {
-      const records = await AttendanceService.getHistory({ year: 2026 });
+      const res = await AttendanceService.getHistory({ adminView: true, year: 2026 });
+      const records = res.records;
       assert.ok(Array.isArray(records));
       for (const r of records) {
         const d = new Date(r.attendanceDate);
@@ -130,7 +136,8 @@ describe('Attendance Date/Month/Year Filtering & Validation Test Suite', () => {
 
     test('5. Specific Employee + All Dates', async () => {
       assert.ok(pavanEmployeeId, 'Pavan employee record required');
-      const records = await AttendanceService.getHistory({ employeeId: pavanEmployeeId });
+      const res = await AttendanceService.getHistory({ employeeId: pavanEmployeeId });
+      const records = res.records;
       assert.ok(Array.isArray(records));
       for (const r of records) {
         assert.strictEqual(r.employeeId, pavanEmployeeId);
@@ -140,10 +147,11 @@ describe('Attendance Date/Month/Year Filtering & Validation Test Suite', () => {
 
     test('6. Specific Employee + Specific Date (Pavan + 2026-09-18)', async () => {
       assert.ok(pavanEmployeeId, 'Pavan employee record required');
-      const records = await AttendanceService.getHistory({
+      const res = await AttendanceService.getHistory({
         employeeId: pavanEmployeeId,
         date: '2026-09-18',
       });
+      const records = res.records;
       assert.ok(Array.isArray(records));
       for (const r of records) {
         assert.strictEqual(r.employeeId, pavanEmployeeId);
@@ -155,11 +163,12 @@ describe('Attendance Date/Month/Year Filtering & Validation Test Suite', () => {
 
     test('7. Specific Employee + Month (Pavan + September 2026)', async () => {
       assert.ok(pavanEmployeeId, 'Pavan employee record required');
-      const records = await AttendanceService.getHistory({
+      const res = await AttendanceService.getHistory({
         employeeId: pavanEmployeeId,
         year: 2026,
         month: 9,
       });
+      const records = res.records;
       assert.ok(Array.isArray(records));
       for (const r of records) {
         assert.strictEqual(r.employeeId, pavanEmployeeId);
@@ -172,10 +181,11 @@ describe('Attendance Date/Month/Year Filtering & Validation Test Suite', () => {
 
     test('8. Specific Employee + Year (Pavan + 2026)', async () => {
       assert.ok(pavanEmployeeId, 'Pavan employee record required');
-      const records = await AttendanceService.getHistory({
+      const res = await AttendanceService.getHistory({
         employeeId: pavanEmployeeId,
         year: 2026,
       });
+      const records = res.records;
       assert.ok(Array.isArray(records));
       for (const r of records) {
         assert.strictEqual(r.employeeId, pavanEmployeeId);

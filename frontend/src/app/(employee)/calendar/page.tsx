@@ -43,6 +43,23 @@ export default function CalendarPage() {
     setCurrentDate(new Date(year, month, 1));
   };
 
+  const getEventDateStr = (ev: any): string => {
+    const raw = ev.startAt || ev.start_at;
+    if (!raw) return '';
+    if (ev.allDay || ev.all_day || ev.eventType === 'HOLIDAY' || ev.event_type === 'HOLIDAY') {
+      return typeof raw === 'string' ? raw.slice(0, 10) : new Date(raw).toISOString().slice(0, 10);
+    }
+    const dt = new Date(raw);
+    if (isNaN(dt.getTime())) return '';
+    return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+  };
+
+  const getHolidayDateStr = (h: any): string => {
+    const raw = h.holidayDate || h.holiday_date;
+    if (!raw) return '';
+    return typeof raw === 'string' ? raw.slice(0, 10) : new Date(raw).toISOString().slice(0, 10);
+  };
+
   // Generate calendar grid days
   const daysInMonth = new Date(year, month, 0).getDate();
   const firstDayOfWeek = new Date(year, month - 1, 1).getDay(); // 0 = Sun, 1 = Mon...
@@ -92,15 +109,15 @@ export default function CalendarPage() {
 
               {days.map((d) => {
                 const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-                const isHoliday = data.holidays?.find((h: any) => h.holidayDate?.startsWith(dateStr) || h.holiday_date?.startsWith(dateStr));
+                const isHoliday = data.holidays?.find((h: any) => getHolidayDateStr(h) === dateStr);
                 const isLeave = data.leaves?.find((l: any) => {
-                  const s = l.startDate ? l.startDate.split('T')[0] : '';
-                  const e = l.endDate ? l.endDate.split('T')[0] : '';
-                  return dateStr >= s && dateStr <= e;
+                  const s = (l.startDate || l.start_date || '').slice(0, 10);
+                  const e = (l.endDate || l.end_date || '').slice(0, 10);
+                  return Boolean(s && e && dateStr >= s && dateStr <= e);
                 });
-                const isAttended = data.attendances?.find((a: any) => a.attendanceDate?.startsWith(dateStr) || a.attendance_date?.startsWith(dateStr));
-                const dayEvents = data.events?.filter((e: any) => e.startAt?.startsWith(dateStr) || e.start_at?.startsWith(dateStr));
-                const dayTasks = data.tasks?.filter((t: any) => t.startDate?.startsWith(dateStr) || t.dueDate?.startsWith(dateStr));
+                const isAttended = data.attendances?.find((a: any) => (a.attendanceDate || a.attendance_date || '').slice(0, 10) === dateStr);
+                const dayEvents = data.events?.filter((e: any) => getEventDateStr(e) === dateStr);
+                const dayTasks = data.tasks?.filter((t: any) => (t.startDate?.slice(0, 10) === dateStr || t.dueDate?.slice(0, 10) === dateStr));
 
                 return (
                   <div

@@ -24,7 +24,7 @@ export class AuthController {
     // Set HTTPOnly cookies
     reply.setCookie('access_token', result.accessToken, {
       ...cookieOptions,
-      maxAge: 15 * 60, // 15 minutes
+      maxAge: 24 * 60 * 60, // 24 hours
     });
 
     reply.setCookie('refresh_token', result.refreshToken, {
@@ -91,7 +91,7 @@ export class AuthController {
 
     reply.setCookie('access_token', result.accessToken, {
       ...cookieOptions,
-      maxAge: 15 * 60,
+      maxAge: 24 * 60 * 60,
     });
 
     reply.setCookie('refresh_token', result.refreshToken, {

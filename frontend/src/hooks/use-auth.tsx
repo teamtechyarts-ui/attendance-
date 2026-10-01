@@ -55,9 +55,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
       }
     } catch (err: any) {
-      // ONLY clear session/token if it is an explicit 401 Unauthorized or 403 Forbidden!
-      // A 429 Too Many Requests, 500 Server Error, or network glitch MUST NOT wipe the user session!
-      if (err?.status === 401 || err?.statusCode === 401 || err?.status === 403 || err?.statusCode === 403) {
+      // ONLY clear session/token if it is an explicit 401 Unauthorized with genuine session expiration/revocation
+      // A 403 Forbidden (e.g. attendance required modal or RBAC permission), 429 Rate Limit, 500 Server Error, or network error MUST NEVER wipe the user session!
+      if (err?.status === 401 || err?.statusCode === 401 || err?.code === 'UNAUTHORIZED' || err?.code === 'SESSION_INVALID' || err?.code === 'SESSION_REVOKED') {
         setUser(null);
         setSession(null);
         setAccessMode(null);
@@ -65,6 +65,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         api.setToken(null);
         if (typeof window !== 'undefined') {
           localStorage.removeItem('workos_user_cache');
+          localStorage.removeItem('workos_refresh_token');
         }
       }
     } finally {
@@ -105,8 +106,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const login = async (data: any) => {
     const result = await authApi.login(data);
     api.setToken(result.accessToken);
-    if (typeof window !== 'undefined' && result.session.user) {
-      localStorage.setItem('workos_user_cache', JSON.stringify(result.session.user));
+    if (typeof window !== 'undefined') {
+      if (result.session.user) {
+        localStorage.setItem('workos_user_cache', JSON.stringify(result.session.user));
+      }
+      if (result.refreshToken) {
+        localStorage.setItem('workos_refresh_token', result.refreshToken);
+      }
     }
     setUser(result.session.user);
     setSession(result.session);
@@ -137,6 +143,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       api.setToken(null);
       if (typeof window !== 'undefined') {
         localStorage.removeItem('workos_user_cache');
+        localStorage.removeItem('workos_refresh_token');
       }
       setUser(null);
       setSession(null);
@@ -146,7 +153,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  const markAttendanceSuccess = (record: AttendanceRecord) => {
+  const markAttendanceSuccess = (record: AttendanceRecord & { accessToken?: string; refreshToken?: string }) => {
+    if (record.accessToken) {
+      api.setToken(record.accessToken);
+    }
+    if (record.refreshToken && typeof window !== 'undefined') {
+      localStorage.setItem('workos_refresh_token', record.refreshToken);
+    }
     setTodayAttendance(record);
     setAccessMode('NORMAL');
     if (session) {

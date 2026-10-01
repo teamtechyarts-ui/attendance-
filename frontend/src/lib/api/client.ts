@@ -77,14 +77,24 @@ class ApiClient {
         ) {
           this.isRefreshing = true;
           try {
+            const storedRefreshToken = typeof window !== 'undefined' ? localStorage.getItem('workos_refresh_token') : null;
             const refreshRes = await fetch(`${API_BASE_URL}/api/auth/refresh`, {
               method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ refreshToken: storedRefreshToken }),
               credentials: 'include',
             });
             if (refreshRes.ok) {
               const refreshData = await refreshRes.json();
-              if (refreshData.data?.accessToken) {
-                this.setToken(refreshData.data.accessToken);
+              const newAccessToken = refreshData.data?.accessToken;
+              const newRefreshToken = refreshData.data?.refreshToken;
+              if (newAccessToken) {
+                this.setToken(newAccessToken);
+                if (newRefreshToken && typeof window !== 'undefined') {
+                  localStorage.setItem('workos_refresh_token', newRefreshToken);
+                }
                 this.isRefreshing = false;
                 // Retry original request
                 return await this.request<T>(path, options);
@@ -92,6 +102,9 @@ class ApiClient {
             } else if (refreshRes.status === 401 || refreshRes.status === 403) {
               // Only genuine authentication/authorization failure revokes the token
               this.setToken(null);
+              if (typeof window !== 'undefined') {
+                localStorage.removeItem('workos_refresh_token');
+              }
             }
             // For 429 or 500 during refresh, do NOT revoke or wipe token!
           } catch {
