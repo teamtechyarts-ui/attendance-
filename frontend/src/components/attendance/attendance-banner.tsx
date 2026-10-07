@@ -35,7 +35,7 @@ export function AttendanceBanner() {
   return (
     <>
       <div className="w-full bg-neutral-900 text-white border-b border-neutral-800 px-4 py-3 shadow-md">
-        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-3 text-center sm:text-left">
+        <div className="w-full max-w-[1600px] 2xl:max-w-[1720px] mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-3 text-center sm:text-left">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-full bg-neutral-800 flex items-center justify-center text-amber-400 shrink-0">
               <AlertCircle className="w-5 h-5 animate-pulse" />

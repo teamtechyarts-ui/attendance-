@@ -45,8 +45,195 @@ export class LeaveService {
   private static readonly ALLOCATIONS_SETTING_KEY = 'workos_leave_allocations';
 
   // ==========================================
-  // LEAVE TYPES (CRUD)
+  // LEAVE TYPES (CRUD) & EARNED LEAVE
   // ==========================================
+
+  /**
+   * Ensures the dedicated 'Earned Leave' leave type exists in the database
+   */
+  public static async ensureEarnedLeaveType(): Promise<any> {
+    const types = await LeaveService.getLeaveTypes(true);
+    let earnedType = types.find((t: any) =>
+      t.name.toLowerCase().includes('earned') || t.name.toLowerCase() === 'earned leave'
+    );
+
+    if (!earnedType) {
+      earnedType = await DbService.query(
+        async () => prisma.leaveType.create({
+          data: {
+            name: 'Earned Leave',
+            description: 'Leave earned by working on official company holidays',
+            defaultDaysPerYear: 0,
+            isPaid: true,
+            isActive: true,
+          },
+        }),
+        async () => {
+          const rows = await DbService.restRequest<any[]>('/leave_types', {
+            method: 'POST',
+            body: {
+              id: randomUUID(),
+              name: 'Earned Leave',
+              description: 'Leave earned by working on official company holidays',
+              default_days_per_year: 0,
+              is_paid: true,
+              is_active: true,
+            },
+          });
+          return rows?.[0] || null;
+        }
+      );
+    }
+    return earnedType;
+  }
+
+  /**
+   * Server-authoritative, idempotent crediting of Earned Leave for holiday work
+   */
+  public static async creditEarnedLeaveForHolidayWork(
+    employeeIdOrParams:
+      | string
+      | {
+          employeeId: string;
+          holidayDate: string; // YYYY-MM-DD
+          workedMinutes: number;
+          userId?: string;
+          clientInfo?: { ipAddress?: string; userAgent?: string };
+        },
+    holidayDateArg?: string,
+    creditAmountArg?: number,
+    userIdArg?: string,
+    workedMinutesArg?: number,
+    clientInfoArg?: { ipAddress?: string; userAgent?: string }
+  ): Promise<{ success: boolean; credited: boolean; days: number; holidayDate: string; alreadyCredited?: boolean; reason?: string }> {
+    let employeeId: string;
+    let holidayDate: string;
+    let workedMinutes: number;
+    let userId: string | undefined;
+    let clientInfo: { ipAddress?: string; userAgent?: string } | undefined;
+
+    if (typeof employeeIdOrParams === 'object') {
+      employeeId = employeeIdOrParams.employeeId;
+      holidayDate = employeeIdOrParams.holidayDate;
+      workedMinutes = employeeIdOrParams.workedMinutes;
+      userId = employeeIdOrParams.userId;
+      clientInfo = employeeIdOrParams.clientInfo;
+    } else {
+      employeeId = employeeIdOrParams;
+      holidayDate = holidayDateArg!;
+      workedMinutes = workedMinutesArg !== undefined ? workedMinutesArg : (creditAmountArg === 0.5 ? 240 : 480);
+      userId = userIdArg;
+      clientInfo = clientInfoArg;
+    }
+
+    const cleanDate = holidayDate.slice(0, 10);
+    const [yearStr] = cleanDate.split('-');
+    const year = parseInt(yearStr, 10);
+
+    // Rule: Full Day (>= 390m / 6h30m) -> 1.0, Half Day (>= 240m / 4h) -> 0.5, else 0
+    let creditAmount = 0;
+    if (workedMinutes >= 390) {
+      creditAmount = 1.0;
+    } else if (workedMinutes >= 240) {
+      creditAmount = 0.5;
+    }
+
+    if (creditAmount <= 0) {
+      return { success: true, credited: false, days: 0, holidayDate: cleanDate, reason: 'Worked duration does not meet minimum threshold (4h)' };
+    }
+
+    // Ensure Earned Leave Type exists
+    const earnedLeaveType = await LeaveService.ensureEarnedLeaveType();
+    if (!earnedLeaveType) {
+      return { success: false, credited: false, days: 0, holidayDate: cleanDate, reason: 'Could not resolve Earned Leave type' };
+    }
+
+    // IDEMPOTENCY CHECK: Check if an allocation record with holidayDate tag already exists
+    const allAllocations = await LeaveService.getAllocations();
+    const idempotencyTag = `HOLIDAY_WORKED:${cleanDate}`;
+    const alreadyCredited = allAllocations.find(
+      (a: any) =>
+        a.leaveTypeId === earnedLeaveType.id &&
+        a.year === year &&
+        a.targetEmployeeIds?.includes(employeeId) &&
+        (a.notes?.includes(idempotencyTag) || a.notes?.includes(cleanDate))
+    );
+
+    if (alreadyCredited) {
+      return {
+        success: true,
+        credited: false,
+        alreadyCredited: true,
+        days: Number(alreadyCredited.allocatedDays),
+        holidayDate: cleanDate,
+        reason: 'Earned leave was already credited for this holiday date',
+      };
+    }
+
+    // Create Idempotent Leave Allocation Record
+    await LeaveService.createAllocation(
+      {
+        leaveTypeId: earnedLeaveType.id,
+        year,
+        month: null, // Annual balance addition
+        targetType: 'EMPLOYEES',
+        targetEmployeeIds: [employeeId],
+        allocatedDays: creditAmount,
+        notes: `Earned leave credit for working on official holiday ${cleanDate} (${workedMinutes} mins). [${idempotencyTag}]`,
+      },
+      { id: userId || 'system', role: 'SUPER_ADMIN', email: 'system@workos.local' } as any,
+      clientInfo || {}
+    );
+
+    // Also update EmployeeLeaveBalance if table exists
+    try {
+      await DbService.query(
+        async () => {
+          const existingBal = await prisma.employeeLeaveBalance.findFirst({
+            where: { employeeId, leaveTypeId: earnedLeaveType.id, year },
+          });
+          if (existingBal) {
+            await prisma.employeeLeaveBalance.update({
+              where: { id: existingBal.id },
+              data: { allocatedDays: { increment: creditAmount } },
+            });
+          } else {
+            await prisma.employeeLeaveBalance.create({
+              data: {
+                employeeId,
+                leaveTypeId: earnedLeaveType.id,
+                year,
+                allocatedDays: creditAmount,
+                usedDays: 0,
+                pendingDays: 0,
+              },
+            });
+          }
+        },
+        async () => {}
+      );
+    } catch {}
+
+    // Audit Log
+    await AuditService.log({
+      userId: userId || null,
+      employeeId,
+      action: 'UPDATE',
+      entityType: 'earned_leave',
+      entityId: earnedLeaveType.id,
+      description: `Credited ${creditAmount} day(s) Earned Leave to employee for working on holiday ${cleanDate} (${workedMinutes} mins worked)`,
+      ipAddress: clientInfo?.ipAddress,
+      userAgent: clientInfo?.userAgent,
+      metadata: { holidayDate: cleanDate, workedMinutes, creditAmount, idempotencyTag },
+    });
+
+    return {
+      success: true,
+      credited: true,
+      days: creditAmount,
+      holidayDate: cleanDate,
+    };
+  }
 
   public static async getLeaveTypes(includeInactive: boolean = false) {
     return DbService.query(
@@ -343,7 +530,7 @@ export class LeaveService {
       createdBy: user.id,
     };
 
-    // Remove any existing duplicate rule for the exact same target + leaveType + year + month
+    // Remove any existing duplicate rule for the exact same target + leaveType + year + month + notes
     const filtered = all.filter((a) => {
       const sameType = a.leaveTypeId === record.leaveTypeId && a.year === record.year && a.month === record.month && a.targetType === record.targetType;
       if (!sameType) return true;
@@ -352,6 +539,10 @@ export class LeaveService {
       if (record.targetType === 'DESIGNATION' && a.targetDesignationId === record.targetDesignationId) return false;
       if ((record.targetType === 'EMPLOYEE' || record.targetType === 'EMPLOYEES') &&
           record.targetEmployeeIds?.some((id) => a.targetEmployeeIds?.includes(id))) {
+        // If it's a distinct note/grant (e.g. different holiday worked credit), keep both!
+        if (record.notes && a.notes && record.notes !== a.notes) {
+          return true;
+        }
         return false;
       }
       return true;
@@ -518,11 +709,13 @@ export class LeaveService {
       (a) => a.leaveTypeId === leaveTypeId && a.year === year && (a.month === null || a.month === month)
     );
 
-    // 1. Specific Employee
-    const empAlloc = matching.find(
+    // 1. Specific Employee (sum all individual allocations & earned leave credits)
+    const empAllocs = matching.filter(
       (a) => (a.targetType === 'EMPLOYEE' || a.targetType === 'EMPLOYEES') && a.targetEmployeeIds?.includes(employee.id)
     );
-    if (empAlloc) return Number(empAlloc.allocatedDays);
+    if (empAllocs.length > 0) {
+      return empAllocs.reduce((sum, a) => sum + Number(a.allocatedDays || 0), 0);
+    }
 
     // 2. Department
     if (employee.departmentId) {

@@ -714,6 +714,30 @@ export class TaskService {
           userAgent: clientInfo.userAgent,
         });
 
+        // Dispatch task assigned email notification asynchronously (Part 17)
+        (async () => {
+          try {
+            const assigneeEmp = await prisma.employee.findUnique({
+              where: { id: targetEmployeeId },
+              include: { user: true },
+            });
+            const recipientEmail = assigneeEmp?.user?.email || assigneeEmp?.email;
+            if (recipientEmail) {
+              await EmailService.sendTaskAssigned(recipientEmail, {
+                employeeName: assigneeEmp?.displayName || `${assigneeEmp?.firstName || ''} ${assigneeEmp?.lastName || ''}`.trim() || 'Team Member',
+                taskTitle: task.title,
+                projectName: task.project?.name,
+                priority: task.priority,
+                dueDate: task.dueDate ? DateTimeUtil.formatDateString(task.dueDate) : undefined,
+                assignedBy: user.displayName || user.email,
+                taskUrl: `/tasks?taskId=${task.id}`,
+              });
+            }
+          } catch (e: any) {
+            console.error('[TaskService] Failed to send task assigned email:', e.message);
+          }
+        })();
+
         return {
           ...task,
           startDate: task.startDate ? task.startDate.toISOString().split('T')[0] : assignedDateStr,

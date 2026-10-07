@@ -25,6 +25,9 @@ import { notificationRoutes } from './modules/notifications/notification.routes.
 import { auditRoutes } from './modules/audit/audit.routes.js';
 import { emailRoutes } from './modules/email/email.routes.js';
 import { rbacRoutes } from './modules/rbac/rbac.routes.js';
+import { schedulerRoutes } from './modules/scheduler/scheduler.routes.js';
+import websocket from '@fastify/websocket';
+import { collaborationRoutes } from './modules/collaboration/chat.routes.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
   const app = fastify({
@@ -169,6 +172,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   });
 
   await app.register(sensible);
+  await app.register(websocket);
 
   // Central Error Handler
   app.setErrorHandler(errorHandler);
@@ -200,6 +204,8 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(auditRoutes, { prefix: '/api/audit' });
   await app.register(emailRoutes, { prefix: '/api/admin/email' });
   await app.register(rbacRoutes, { prefix: '/api/rbac' });
+  await app.register(schedulerRoutes, { prefix: '/api/scheduler' });
+  await app.register(collaborationRoutes);
 
   return app;
 }

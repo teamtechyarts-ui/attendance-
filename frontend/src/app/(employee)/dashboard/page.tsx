@@ -28,7 +28,15 @@ import {
 import Link from 'next/link';
 
 export default function EmployeeDashboard() {
-  const { user, session, accessMode, todayAttendance, markAttendanceSuccess } = useAuth();
+  const {
+    user,
+    session,
+    accessMode,
+    todayAttendance,
+    isAttendanceLoading,
+    isAttendanceResolved,
+    markAttendanceSuccess,
+  } = useAuth();
   const { activeTimer, elapsedSeconds, startTimer, pauseTimer, stopTimer, refreshTimer } = useTaskTimer();
 
   const [todayData, setTodayData] = useState<any>(() => todayAttendance);
@@ -177,7 +185,9 @@ export default function EmployeeDashboard() {
           <p className="text-xs text-neutral-500 mt-0.5">{currentDate}</p>
         </div>
         <div className="flex items-center gap-2">
-          {todayAttendance?.checkInAt ? (
+          {!isAttendanceResolved || isAttendanceLoading ? (
+            <div className="h-8 w-36 rounded-md bg-neutral-200/80 animate-pulse" />
+          ) : todayAttendance?.checkInAt ? (
             <div className="flex items-center gap-2">
               <Badge variant="success" className="px-3 py-1 text-xs">
                 ● {todayAttendance.workMode} · {formatTime(todayAttendance.checkInAt)}

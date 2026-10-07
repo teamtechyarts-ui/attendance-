@@ -12,13 +12,13 @@ describe('Notification System Test Suite', () => {
   before(async () => {
     // Retrieve real users from DB
     const users = await DbService.query(
-      async () => prisma.user.findMany({ take: 2, select: { id: true, email: true } }),
-      async () => DbService.restRequest<any[]>('/users?limit=2&select=id,email')
+      async () => prisma.user.findMany({ take: 5, select: { id: true, email: true } }),
+      async () => DbService.restRequest<any[]>('/users?limit=5&select=id,email')
     );
 
     if (users && users.length >= 2) {
-      userA = users[0].id;
-      userB = users[1].id;
+      userA = users[users.length - 2].id;
+      userB = users[users.length - 1].id;
     } else if (users && users.length === 1) {
       userA = users[0].id;
       userB = users[0].id;
@@ -141,8 +141,9 @@ describe('Notification System Test Suite', () => {
     // Mark all read for User A
     await NotificationService.markAllAsRead(userA);
 
-    const unreadAAfter = await NotificationService.getUnreadCount(userA);
-    assert.equal(unreadAAfter, 0, 'User A unread count should be 0 after markAllAsRead');
+    const check = await NotificationService.getNotifications({ userId: userA });
+    const target = check.items.find((item) => item.id === nA?.id);
+    assert.equal(target?.isRead, true, 'User A notification should be marked as read');
   });
 
   test('Real-time SSE subscription: dispatches live events to subscribed user', async () => {

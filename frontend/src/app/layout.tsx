@@ -4,6 +4,10 @@ import './globals.css';
 import { AuthProvider } from '@/hooks/use-auth';
 import { NotificationsProvider } from '@/hooks/use-notifications';
 import { TaskTimerProvider } from '@/hooks/use-task-timer';
+import { CollaborationProvider } from '@/context/collaboration-context';
+import { CallOverlay } from '@/components/collaboration/call-overlay';
+import { MeetingOverlay } from '@/components/collaboration/meeting-overlay';
+import { IncomingMeetingPrompt } from '@/components/collaboration/incoming-meeting-prompt';
 import { TopNav } from '@/components/layout/top-nav';
 import { AttendanceBanner } from '@/components/attendance/attendance-banner';
 
@@ -30,9 +34,14 @@ export default function RootLayout({
         <AuthProvider>
           <NotificationsProvider>
             <TaskTimerProvider>
-              <TopNav />
-              <AttendanceBanner />
-              <main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 py-6">{children}</main>
+              <CollaborationProvider>
+                <TopNav />
+                <AttendanceBanner />
+                <main className="flex-1 w-full max-w-[1600px] 2xl:max-w-[1720px] mx-auto px-4 sm:px-6 lg:px-8 py-6">{children}</main>
+                <CallOverlay />
+                <MeetingOverlay />
+                <IncomingMeetingPrompt />
+              </CollaborationProvider>
             </TaskTimerProvider>
           </NotificationsProvider>
         </AuthProvider>
@@ -40,3 +49,4 @@ export default function RootLayout({
     </html>
   );
 }
+

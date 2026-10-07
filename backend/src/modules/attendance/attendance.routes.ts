@@ -10,6 +10,7 @@ export async function attendanceRoutes(fastify: FastifyInstance) {
   fastify.get('/today', AttendanceController.getToday);
   fastify.post('/check-in', AttendanceController.checkIn);
   fastify.post('/check-out', AttendanceController.checkOut);
+  fastify.post('/confirm-overtime', AttendanceController.confirmOvertime);
   fastify.get('/history', AttendanceController.getHistory);
 
   // Admin Dashboard Live Operations

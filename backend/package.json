@@ -13,7 +13,7 @@
     "prisma:generate": "prisma generate --schema=./prisma/schema.prisma",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/auth-and-attendance.test.ts tests/email.test.ts tests/forgot-password-flow.test.ts tests/attendance-timer-checkout.test.ts tests/master-data-crud.test.ts tests/attendance-filters.test.ts tests/notifications.test.ts tests/sse-stream-cors.test.ts tests/attendance-date-range-and-shift.test.ts"
+    "test": "tsx --test tests/auth-and-attendance.test.ts tests/email.test.ts tests/forgot-password-flow.test.ts tests/attendance-timer-checkout.test.ts tests/master-data-crud.test.ts tests/attendance-filters.test.ts tests/notifications.test.ts tests/sse-stream-cors.test.ts tests/attendance-date-range-and-shift.test.ts tests/attendance-holiday-earned-leave-scheduler.test.ts tests/group-meetings.test.ts tests/screen-sharing.test.ts tests/advanced-meeting.test.ts tests/presence-availability.test.ts tests/group-collaboration-forensic.test.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^9.3.1",
@@ -21,6 +21,7 @@
     "@fastify/helmet": "^11.1.1",
     "@fastify/rate-limit": "^9.1.0",
     "@fastify/sensible": "^5.5.0",
+    "@fastify/websocket": "^8.3.1",
     "@prisma/client": "^5.14.0",
     "@types/jsonwebtoken": "^9.0.6",
     "@types/node": "^20.12.12",
@@ -39,6 +40,7 @@
     "@types/jsonwebtoken": "^9.0.6",
     "@types/node": "^20.12.12",
     "@types/nodemailer": "^8.0.2",
+    "@types/ws": "^8.18.2",
     "prisma": "^5.14.0",
     "tsx": "^4.10.5",
     "typescript": "^5.4.5"

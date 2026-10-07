@@ -1,114 +1,103 @@
 /**
- * Notification Sound Manager
- * Handles audio playback with deduplication, user-gesture permission checks,
- * and Web Audio API synthesized chime for reliable offline audio.
+ * Sound Manager
+ * Handles local audio playback for system notifications and collaboration chat messages
+ * with strict deduplication, user preference persistence, and autoplay resilience.
  */
-
-let lastPlayedTime = 0;
-const DEBOUNCE_INTERVAL_MS = 3000; // Throttle to max 1 chime per 3 seconds
-
 class SoundManager {
-  private audioContext: AudioContext | null = null;
-  private hasInteracted = false;
+  private audio: HTMLAudioElement | null = null;
+  private playedMessageIds = new Set<string>();
+  private soundEnabled: boolean = true;
 
   constructor() {
     if (typeof window !== 'undefined') {
-      const handleUserInteraction = () => {
-        this.hasInteracted = true;
-        window.removeEventListener('click', handleUserInteraction);
-        window.removeEventListener('keydown', handleUserInteraction);
-        window.removeEventListener('touchstart', handleUserInteraction);
-      };
+      try {
+        const saved = localStorage.getItem('sound_notifications_enabled');
+        if (saved !== null) {
+          this.soundEnabled = saved === 'true';
+        }
+      } catch {}
+    }
+  }
 
-      window.addEventListener('click', handleUserInteraction, { passive: true });
-      window.addEventListener('keydown', handleUserInteraction, { passive: true });
-      window.addEventListener('touchstart', handleUserInteraction, { passive: true });
+  public isSoundEnabled(): boolean {
+    return this.soundEnabled;
+  }
+
+  public setSoundEnabled(enabled: boolean): void {
+    this.soundEnabled = enabled;
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('sound_notifications_enabled', String(enabled));
+      } catch {}
     }
   }
 
   /**
-   * Check if sound preference is enabled in localStorage
+   * Plays the incoming chat notification sound if the message has not already triggered a sound.
+   * Gracefully ignores browser autoplay restrictions without errors or noisy logging.
    */
-  public isSoundEnabled(): boolean {
-    if (typeof window === 'undefined') return false;
-    const stored = localStorage.getItem('teamstechyarts_notification_sound');
-    return stored !== 'false'; // Default to true if not set
+  public playIncomingMessageSound(messageId?: string): void {
+    if (typeof window === 'undefined' || !this.soundEnabled) return;
+
+    if (messageId) {
+      if (this.playedMessageIds.has(messageId)) {
+        return; // Already played for this message
+      }
+      this.playedMessageIds.add(messageId);
+      // Keep memory bounded to last 1000 messages
+      if (this.playedMessageIds.size > 1000) {
+        const firstKey = this.playedMessageIds.values().next().value;
+        if (firstKey) this.playedMessageIds.delete(firstKey);
+      }
+    }
+
+    this.playAudio();
   }
 
   /**
-   * Set sound preference in localStorage
-   */
-  public setSoundEnabled(enabled: boolean): void {
-    if (typeof window === 'undefined') return;
-    localStorage.setItem('teamstechyarts_notification_sound', enabled ? 'true' : 'false');
-  }
-
-  /**
-   * Play notification sound with throttling and browser autoplay safety
+   * Plays notification chime for system notifications (SSE stream / task reminders / etc.)
    */
   public playNotificationChime(): void {
-    if (typeof window === 'undefined') return;
-    if (!this.isSoundEnabled()) return;
-    if (!this.hasInteracted) return; // Prevent browser autoplay policy error
-
-    const now = Date.now();
-    if (now - lastPlayedTime < DEBOUNCE_INTERVAL_MS) {
-      return; // Deduplicate rapid sounds
-    }
-    lastPlayedTime = now;
-
-    // Play instant pleasant two-tone harmonic chime via Web Audio API without extra HTTP request
-    this.playSynthesizedChime();
+    if (typeof window === 'undefined' || !this.soundEnabled) return;
+    this.playAudio();
   }
 
-  /**
-   * Synthesize a gentle, modern harmonic chime via Web Audio API
-   */
-  private playSynthesizedChime(): void {
+  private ringtoneAudio: HTMLAudioElement | null = null;
+
+  public playIncomingCallRingtone(): void {
+    if (typeof window === 'undefined' || !this.soundEnabled) return;
     try {
-      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      if (!AudioCtx) return;
-
-      if (!this.audioContext || this.audioContext.state === 'closed') {
-        this.audioContext = new AudioCtx();
+      if (!this.ringtoneAudio) {
+        this.ringtoneAudio = new Audio('/sounds/incoming-call.mp3');
+        this.ringtoneAudio.loop = true;
       }
+      this.ringtoneAudio.currentTime = 0;
+      this.ringtoneAudio.play().catch(() => {
+        // Autoplay policy restriction handled gracefully
+      });
+    } catch {}
+  }
 
-      if (this.audioContext.state === 'suspended') {
-        this.audioContext.resume().catch(() => {});
+  public stopIncomingCallRingtone(): void {
+    try {
+      if (this.ringtoneAudio) {
+        this.ringtoneAudio.pause();
+        this.ringtoneAudio.currentTime = 0;
       }
+    } catch {}
+  }
 
-      const ctx = this.audioContext;
-      const startTime = ctx.currentTime;
-
-      // Note 1: 659.25 Hz (E5)
-      const osc1 = ctx.createOscillator();
-      const gain1 = ctx.createGain();
-      osc1.type = 'sine';
-      osc1.frequency.setValueAtTime(659.25, startTime);
-      gain1.gain.setValueAtTime(0, startTime);
-      gain1.gain.linearRampToValueAtTime(0.2, startTime + 0.02);
-      gain1.gain.exponentialRampToValueAtTime(0.001, startTime + 0.4);
-
-      osc1.connect(gain1);
-      gain1.connect(ctx.destination);
-      osc1.start(startTime);
-      osc1.stop(startTime + 0.4);
-
-      // Note 2: 880 Hz (A5) - slightly delayed
-      const osc2 = ctx.createOscillator();
-      const gain2 = ctx.createGain();
-      osc2.type = 'sine';
-      osc2.frequency.setValueAtTime(880, startTime + 0.08);
-      gain2.gain.setValueAtTime(0, startTime + 0.08);
-      gain2.gain.linearRampToValueAtTime(0.25, startTime + 0.1);
-      gain2.gain.exponentialRampToValueAtTime(0.001, startTime + 0.6);
-
-      osc2.connect(gain2);
-      gain2.connect(ctx.destination);
-      osc2.start(startTime + 0.08);
-      osc2.stop(startTime + 0.6);
+  private playAudio(): void {
+    try {
+      if (!this.audio) {
+        this.audio = new Audio('/sounds/notification.mp3');
+      }
+      this.audio.currentTime = 0;
+      this.audio.play().catch(() => {
+        // Autoplay policy prevented playback before user gesture; silently ignore
+      });
     } catch {
-      // Audio context failure gracefully ignored
+      // Audio playback unavailable; safely ignore
     }
   }
 }

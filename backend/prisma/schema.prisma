@@ -216,6 +216,13 @@ model User {
   projectMembersAdded  ProjectMember[]      @relation("ProjectMemberAdder")
   taskMentionsAuthored TaskMention[]        @relation("MentionAuthor")
   auditLogs            AuditLog[]
+  createdConversations Conversation[]       @relation("ConversationCreator")
+  conversationMembers  ConversationMember[]
+  sentMessages         Message[]            @relation("MessageSender")
+  messageReactions     MessageReaction[]
+  presence             UserPresence?
+  hostedMeetings       Meeting[]            @relation("MeetingHost")
+  meetingParticipants  MeetingParticipant[]
 
   @@map("users")
 }
@@ -798,3 +805,205 @@ model SystemSetting {
 
   @@map("system_settings")
 }
+
+// ==========================================
+// COLLABORATION & CHAT (PHASE 1)
+// ==========================================
+
+enum ConversationType {
+  DIRECT
+  GROUP
+
+  @@map("conversation_type")
+}
+
+enum ConversationMemberRole {
+  ADMIN
+  MEMBER
+
+  @@map("conversation_member_role")
+}
+
+enum UserPresenceStatus {
+  AVAILABLE
+  BUSY
+  DO_NOT_DISTURB
+  AWAY
+  OFFLINE
+
+  @@map("user_presence_status")
+}
+
+model Conversation {
+  id              String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  type            ConversationType   @default(DIRECT)
+  title           String?            @db.VarChar
+  description     String?            @db.VarChar
+  createdBy       String?            @map("created_by") @db.Uuid
+  directUserAId   String?            @map("direct_user_a_id") @db.Uuid
+  directUserBId   String?            @map("direct_user_b_id") @db.Uuid
+  directKey       String?            @unique @map("direct_key") @db.VarChar
+  isArchived      Boolean            @default(false) @map("is_archived")
+  lastMessageAt   DateTime?          @map("last_message_at") @db.Timestamptz(6)
+  createdAt       DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime           @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  creator         User?              @relation("ConversationCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+  members         ConversationMember[]
+  messages        Message[]
+  meetings        Meeting[]
+
+  @@map("conversations")
+}
+
+model ConversationMember {
+  id                String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  conversationId    String                 @map("conversation_id") @db.Uuid
+  userId            String                 @map("user_id") @db.Uuid
+  role              ConversationMemberRole @default(MEMBER)
+  joinedAt          DateTime               @default(now()) @map("joined_at") @db.Timestamptz(6)
+  leftAt            DateTime?              @map("left_at") @db.Timestamptz(6)
+  lastReadMessageId String?                @map("last_read_message_id") @db.Uuid
+  lastReadAt        DateTime?              @map("last_read_at") @db.Timestamptz(6)
+  mutedAt           DateTime?              @map("muted_at") @db.Timestamptz(6)
+  createdAt         DateTime               @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime               @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  conversation      Conversation           @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user              User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, userId])
+  @@map("conversation_members")
+}
+
+model Message {
+  id                 String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  conversationId     String              @map("conversation_id") @db.Uuid
+  senderUserId       String              @map("sender_user_id") @db.Uuid
+  body               String
+  replyToMessageId   String?             @map("reply_to_message_id") @db.Uuid
+  isSystem           Boolean             @default(false) @map("is_system")
+  createdAt          DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  editedAt           DateTime?           @map("edited_at") @db.Timestamptz(6)
+  deletedAt          DateTime?           @map("deleted_at") @db.Timestamptz(6)
+
+  conversation       Conversation        @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender             User                @relation("MessageSender", fields: [senderUserId], references: [id], onDelete: Cascade)
+  replyTo            Message?            @relation("MessageReplies", fields: [replyToMessageId], references: [id], onDelete: SetNull)
+  replies            Message[]           @relation("MessageReplies")
+  reactions          MessageReaction[]
+  attachments        MessageAttachment[]
+
+  @@map("messages")
+}
+
+model MessageReaction {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  messageId   String    @map("message_id") @db.Uuid
+  userId      String    @map("user_id") @db.Uuid
+  reaction    String    @db.VarChar(20)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  message     Message   @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId])
+  @@map("message_reactions")
+}
+
+model MessageAttachment {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  messageId   String    @map("message_id") @db.Uuid
+  fileName    String    @map("file_name") @db.VarChar
+  fileUrl     String    @map("file_url")
+  fileSize    Int       @map("file_size")
+  fileType    String    @map("file_type") @db.VarChar
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  message     Message   @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@map("message_attachments")
+}
+
+model UserPresence {
+  id                  String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId              String             @unique @map("user_id") @db.Uuid
+  status              UserPresenceStatus @default(OFFLINE)
+  customStatusMessage String?            @map("custom_status_message") @db.VarChar
+  lastSeenAt          DateTime           @default(now()) @map("last_seen_at") @db.Timestamptz(6)
+  updatedAt           DateTime           @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user                User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_presence")
+}
+
+// ==========================================
+// GROUP MEETINGS (PHASE 2B)
+// ==========================================
+
+enum MeetingStatus {
+  SCHEDULED
+  LOBBY
+  ACTIVE
+  ENDING
+  ENDED
+  CANCELLED
+
+  @@map("meeting_status")
+}
+
+enum MeetingParticipantStatus {
+  INVITED
+  JOINING
+  JOINED
+  LEFT
+  DISCONNECTED
+  REMOVED
+
+  @@map("meeting_participant_status")
+}
+
+model Meeting {
+  id              String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  conversationId  String         @map("conversation_id") @db.Uuid
+  hostUserId      String         @map("host_user_id") @db.Uuid
+  title           String?        @db.VarChar
+  status          MeetingStatus  @default(ACTIVE)
+  startedAt       DateTime       @default(now()) @map("started_at") @db.Timestamptz(6)
+  endedAt         DateTime?      @map("ended_at") @db.Timestamptz(6)
+  createdAt       DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime       @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  conversation    Conversation   @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  hostUser        User           @relation("MeetingHost", fields: [hostUserId], references: [id], onDelete: Cascade)
+  participants    MeetingParticipant[]
+
+  @@index([conversationId])
+  @@index([status])
+  @@map("meetings")
+}
+
+model MeetingParticipant {
+  id              String                   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  meetingId       String                   @map("meeting_id") @db.Uuid
+  userId          String                   @map("user_id") @db.Uuid
+  status          MeetingParticipantStatus @default(JOINED)
+  isMuted         Boolean                  @default(false) @map("is_muted")
+  isCameraOff     Boolean                  @default(false) @map("is_camera_off")
+  joinedAt        DateTime                 @default(now()) @map("joined_at") @db.Timestamptz(6)
+  leftAt          DateTime?                @map("left_at") @db.Timestamptz(6)
+  lastSeenAt      DateTime                 @default(now()) @map("last_seen_at") @db.Timestamptz(6)
+  createdAt       DateTime                 @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime                 @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  meeting         Meeting                  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  user            User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([meetingId, userId])
+  @@index([meetingId])
+  @@index([userId])
+  @@map("meeting_participants")
+}
+
+

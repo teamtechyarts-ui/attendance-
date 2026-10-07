@@ -11,6 +11,8 @@ interface AuthContextType {
   session: SessionInfo | null;
   accessMode: AccessMode | null;
   isLoading: boolean;
+  isAttendanceLoading: boolean;
+  isAttendanceResolved: boolean;
   todayAttendance: AttendanceRecord | null;
   login: (data: any) => Promise<void>;
   logout: () => Promise<void>;
@@ -20,6 +22,10 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+function getTodayIsoDate(): string {
+  return new Date().toISOString().split('T')[0];
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   // Deterministic initial state for SSR and initial client hydration
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -27,6 +33,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [accessMode, setAccessMode] = useState<AccessMode | null>(null);
   const [todayAttendance, setTodayAttendance] = useState<AttendanceRecord | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isAttendanceLoading, setIsAttendanceLoading] = useState<boolean>(true);
+  const [isAttendanceResolved, setIsAttendanceResolved] = useState<boolean>(false);
 
   const router = useRouter();
   const isRefreshingRef = React.useRef(false);
@@ -42,7 +50,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setAccessMode(data.accessMode);
         if (data.todayAttendance) {
           setTodayAttendance(data.todayAttendance);
+          if (typeof window !== 'undefined') {
+            localStorage.setItem(
+              'workos_today_attendance_cache',
+              JSON.stringify({ date: getTodayIsoDate(), data: data.todayAttendance })
+            );
+          }
+        } else {
+          setTodayAttendance(null);
+          if (typeof window !== 'undefined') {
+            localStorage.removeItem('workos_today_attendance_cache');
+          }
         }
+        setIsAttendanceResolved(true);
+        setIsAttendanceLoading(false);
         if (typeof window !== 'undefined') {
           localStorage.setItem('workos_user_cache', JSON.stringify(data.user));
         }
@@ -62,11 +83,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setSession(null);
         setAccessMode(null);
         setTodayAttendance(null);
+        setIsAttendanceResolved(false);
+        setIsAttendanceLoading(false);
         api.setToken(null);
         if (typeof window !== 'undefined') {
           localStorage.removeItem('workos_user_cache');
           localStorage.removeItem('workos_refresh_token');
+          localStorage.removeItem('workos_today_attendance_cache');
         }
+      } else {
+        setIsAttendanceResolved(true);
+        setIsAttendanceLoading(false);
       }
     } finally {
       setIsLoading(false);
@@ -76,7 +103,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   // Auth initialization runs strictly ONCE on mount after hydration - NOT during SSR
   useEffect(() => {
-    // 1. Immediately hydrate cached user from localStorage on client mount (zero blocking delay)
+    // 1. Immediately hydrate cached user & today's attendance from localStorage on client mount (zero blocking delay)
     let hasCachedUser = false;
     try {
       const cached = localStorage.getItem('workos_user_cache');
@@ -85,6 +112,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setUser(parsed);
         hasCachedUser = true;
       }
+      const cachedAtt = localStorage.getItem('workos_today_attendance_cache');
+      if (cachedAtt) {
+        const parsedAtt = JSON.parse(cachedAtt);
+        if (parsedAtt && parsedAtt.date === getTodayIsoDate() && parsedAtt.data) {
+          setTodayAttendance(parsedAtt.data);
+          setIsAttendanceResolved(true);
+          setIsAttendanceLoading(false);
+        }
+      }
     } catch {
       // ignore
     }
@@ -92,6 +128,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const token = api.getToken();
     if (!token) {
       setIsLoading(false);
+      setIsAttendanceLoading(false);
+      setIsAttendanceResolved(true);
       return;
     }
 
@@ -119,7 +157,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setAccessMode(result.session.accessMode);
     if (result.session.todayAttendance) {
       setTodayAttendance(result.session.todayAttendance);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem(
+          'workos_today_attendance_cache',
+          JSON.stringify({ date: getTodayIsoDate(), data: result.session.todayAttendance })
+        );
+      }
+    } else {
+      setTodayAttendance(null);
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('workos_today_attendance_cache');
+      }
     }
+    setIsAttendanceResolved(true);
+    setIsAttendanceLoading(false);
     setIsLoading(false);
 
     if (result.session.firstLoginRequired || result.session.accessMode === 'FIRST_LOGIN_REQUIRED' || result.session.user?.firstLoginRequired) {
@@ -144,11 +195,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (typeof window !== 'undefined') {
         localStorage.removeItem('workos_user_cache');
         localStorage.removeItem('workos_refresh_token');
+        localStorage.removeItem('workos_today_attendance_cache');
       }
       setUser(null);
       setSession(null);
       setAccessMode(null);
       setTodayAttendance(null);
+      setIsAttendanceResolved(false);
+      setIsAttendanceLoading(false);
       router.push('/login');
     }
   };
@@ -161,6 +215,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       localStorage.setItem('workos_refresh_token', record.refreshToken);
     }
     setTodayAttendance(record);
+    setIsAttendanceResolved(true);
+    setIsAttendanceLoading(false);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(
+        'workos_today_attendance_cache',
+        JSON.stringify({ date: getTodayIsoDate(), data: record })
+      );
+    }
     setAccessMode('NORMAL');
     if (session) {
       setSession({
@@ -180,6 +242,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         session,
         accessMode,
         isLoading,
+        isAttendanceLoading,
+        isAttendanceResolved,
         todayAttendance,
         login,
         logout,

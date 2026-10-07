@@ -54,6 +54,17 @@ export type Permission =
   | 'SETTINGS_VIEW'
   | 'SETTINGS_MANAGE'
   | 'SETTINGS_EDIT'
+  // Collaboration & Chat
+  | 'CHAT_VIEW'
+  | 'CHAT_CREATE_DIRECT'
+  | 'CHAT_CREATE_GROUP'
+  | 'CHAT_MANAGE_GROUP'
+  | 'CHAT_SEND_MESSAGE'
+  | 'CHAT_DELETE_MESSAGE'
+  | 'CHAT_MANAGE_REACTIONS'
+  | 'CHAT_START_MEETING'
+  | 'CHAT_SHARE_SCREEN'
+  | 'CHAT_MANAGE_MEETING'
   // Security & RBAC
   | 'ROLE_VIEW'
   | 'ROLE_ASSIGN'
@@ -83,7 +94,7 @@ export interface LimitedAdminConfig {
 export interface PermissionDefinition {
   id: Permission;
   label: string;
-  group: 'Tasks' | 'Projects' | 'Teams' | 'Work' | 'Reports' | 'Employees' | 'Attendance' | 'Leave' | 'Settings' | 'Security';
+  group: 'Tasks' | 'Projects' | 'Teams' | 'Work' | 'Reports' | 'Employees' | 'Attendance' | 'Leave' | 'Settings' | 'Collaboration' | 'Security';
   description: string;
   isSensitive?: boolean;
 }
@@ -135,6 +146,18 @@ export const PERMISSION_REGISTRY: PermissionDefinition[] = [
   // Settings & Master Data
   { id: 'SETTINGS_VIEW', label: 'View Settings', group: 'Settings', description: 'View organizational settings' },
   { id: 'SETTINGS_MANAGE', label: 'Manage Settings', group: 'Settings', description: 'Modify departments, designations, schedules' },
+
+  // Collaboration & Chat
+  { id: 'CHAT_VIEW', label: 'Access Chat & Directory', group: 'Collaboration', description: 'View People directory and chat conversations' },
+  { id: 'CHAT_CREATE_DIRECT', label: 'Start Direct Chats', group: 'Collaboration', description: 'Start 1:1 direct messaging conversations' },
+  { id: 'CHAT_CREATE_GROUP', label: 'Create Group Chats', group: 'Collaboration', description: 'Create and organize group channels' },
+  { id: 'CHAT_MANAGE_GROUP', label: 'Manage Group Members', group: 'Collaboration', description: 'Add or remove members and rename groups' },
+  { id: 'CHAT_SEND_MESSAGE', label: 'Send Chat Messages', group: 'Collaboration', description: 'Send messages, replies, and reactions' },
+  { id: 'CHAT_DELETE_MESSAGE', label: 'Moderate Chat Messages', group: 'Collaboration', description: 'Delete messages for moderation' },
+  { id: 'CHAT_MANAGE_REACTIONS', label: 'Manage Reactions', group: 'Collaboration', description: 'Add and remove emoji reactions' },
+  { id: 'CHAT_START_MEETING', label: 'Start Group Meetings', group: 'Collaboration', description: 'Start and host group meetings in group chats' },
+  { id: 'CHAT_SHARE_SCREEN', label: 'Share Screen', group: 'Collaboration', description: 'Share screen in calls and meetings' },
+  { id: 'CHAT_MANAGE_MEETING', label: 'Manage Meeting Participants', group: 'Collaboration', description: 'Mute or remove participants in hosted meetings' },
 
   // Security & RBAC (Protected - Super Admin only)
   { id: 'ROLE_VIEW', label: 'View Roles', group: 'Security', description: 'View role assignments' },

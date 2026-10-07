@@ -3,11 +3,20 @@ import { config } from '../config/env.js';
 
 // Resilient DB service that connects via Prisma or Supabase REST engine
 export class DbService {
-  private static useRestFallback = Boolean(
-    !process.env.DATABASE_URL ||
-    process.env.DATABASE_URL.includes(':password@') ||
-    process.env.USE_REST_FALLBACK === 'true'
-  );
+  private static forcedRestFallback = false;
+
+  public static forceRestFallback(force: boolean = true) {
+    DbService.forcedRestFallback = force;
+  }
+
+  public static get useRestFallback(): boolean {
+    if (DbService.forcedRestFallback) return true;
+    return Boolean(
+      !process.env.DATABASE_URL ||
+      process.env.DATABASE_URL.includes(':password@') ||
+      process.env.USE_REST_FALLBACK === 'true'
+    );
+  }
 
   public static async query<T>(
     prismaFn: () => Promise<T>,
@@ -26,7 +35,7 @@ export class DbService {
       }
       // If PostgreSQL connection error (e.g. invalid password / host unreachable in local dev)
       if (restFallbackFn) {
-        DbService.useRestFallback = true;
+        DbService.forcedRestFallback = true;
         return await restFallbackFn();
       }
       throw err;
@@ -75,9 +84,10 @@ export class DbService {
   ): Promise<T> {
     const url = `${config.supabaseUrl}/rest/v1${path}`;
     const method = options.method || 'GET';
+    const isJwt = config.supabaseSecretKey ? config.supabaseSecretKey.startsWith('eyJ') : false;
     const headers: Record<string, string> = {
       apikey: config.supabaseSecretKey,
-      Authorization: `Bearer ${config.supabaseSecretKey}`,
+      ...(isJwt ? { Authorization: `Bearer ${config.supabaseSecretKey}` } : {}),
       'Content-Type': 'application/json',
       Prefer: 'return=representation',
       ...options.headers,
@@ -129,8 +139,57 @@ export class DbService {
       return [] as unknown as T;
     }
 
-    const data = await res.json();
+    const text = await res.text();
+    if (!text || !text.trim()) {
+      return [] as unknown as T;
+    }
+
+    const data = JSON.parse(text);
     return DbService.toCamelCase<T>(data);
+  }
+
+  public static async querySupabaseTable<T = any>(
+    table: string,
+    params: Record<string, string> = {}
+  ): Promise<T[]> {
+    const query = new URLSearchParams(params).toString();
+    const path = `/${table}${query ? `?${query}` : ''}`;
+    return await DbService.restRequest<T[]>(path, { method: 'GET' });
+  }
+
+  public static async insertSupabaseTable<T = any>(
+    table: string,
+    data: any | any[]
+  ): Promise<T[]> {
+    const path = `/${table}`;
+    const result = await DbService.restRequest<T[]>(path, {
+      method: 'POST',
+      body: data,
+    });
+    return Array.isArray(result) ? result : [result];
+  }
+
+  public static async updateSupabaseTable<T = any>(
+    table: string,
+    params: Record<string, string>,
+    data: any
+  ): Promise<T[]> {
+    const query = new URLSearchParams(params).toString();
+    const path = `/${table}${query ? `?${query}` : ''}`;
+    const result = await DbService.restRequest<T[]>(path, {
+      method: 'PATCH',
+      body: data,
+    });
+    return Array.isArray(result) ? result : [result];
+  }
+
+  public static async deleteSupabaseTable(
+    table: string,
+    params: Record<string, string>
+  ): Promise<void> {
+    const query = new URLSearchParams(params).toString();
+    const path = `/${table}${query ? `?${query}` : ''}`;
+    await DbService.restRequest(path, { method: 'DELETE' });
   }
 }
 

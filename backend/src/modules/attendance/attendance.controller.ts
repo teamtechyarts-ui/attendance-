@@ -107,6 +107,29 @@ export class AttendanceController {
     });
   }
 
+  public static async confirmOvertime(request: FastifyRequest, reply: FastifyReply) {
+    if (!request.user?.employeeId) {
+      return reply.status(400).send({
+        success: false,
+        error: { code: 'EMPLOYEE_NOT_FOUND', message: 'No employee record associated' },
+      });
+    }
+
+    const data = await AttendanceService.confirmOvertime(
+      request.user.employeeId,
+      request.user.id,
+      {
+        ipAddress: request.ip,
+        userAgent: request.headers['user-agent'],
+      }
+    );
+
+    return reply.send({
+      success: true,
+      data,
+    });
+  }
+
   public static async getLiveOverview(request: FastifyRequest, reply: FastifyReply) {
     const data = await AttendanceService.getLiveOverview();
     return reply.send({

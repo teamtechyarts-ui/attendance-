@@ -34,6 +34,13 @@ export class RbacService {
     'REPORT_VIEW',
     'LEAVE_VIEW',
     'ATTENDANCE_VIEW',
+    'CHAT_VIEW',
+    'CHAT_CREATE_DIRECT',
+    'CHAT_SEND_MESSAGE',
+    'CHAT_MANAGE_REACTIONS',
+    'CHAT_START_MEETING',
+    'CHAT_SHARE_SCREEN',
+    'CHAT_MANAGE_MEETING',
   ];
 
   /**

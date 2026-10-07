@@ -15,6 +15,14 @@ import {
   DailyReportReminderTemplateData,
   AdminNotificationTemplateData,
   WelcomeEmployeeTemplateData,
+  CheckInReminderTemplateData,
+  CheckOutReminderTemplateData,
+  EightHourCheckoutReminderTemplateData,
+  ThirtyMinuteCheckoutReminderTemplateData,
+  TomorrowHolidayTemplateData,
+  TaskDeadlineTemplateData,
+  ScheduledTaskTemplateData,
+  LongRunningTimerTemplateData,
 } from './email.types.js';
 import {
   passwordResetTemplate,
@@ -26,6 +34,14 @@ import {
   dailyReportReminderTemplate,
   adminNotificationTemplate,
   welcomeEmployeeTemplate,
+  checkInReminderTemplate,
+  checkOutReminderTemplate,
+  eightHourCheckoutReminderTemplate,
+  thirtyMinuteCheckoutReminderTemplate,
+  tomorrowHolidayTemplate,
+  taskDeadlineTemplate,
+  scheduledTaskTemplate,
+  longRunningTimerTemplate,
 } from './email.templates.js';
 
 
@@ -430,6 +446,158 @@ export class EmailService {
     options?: { notificationId?: string; userId?: string }
   ): Promise<EmailSendResult> {
     const template = welcomeEmployeeTemplate(data);
+    return this.sendEmail({
+      to,
+      subject: template.subject,
+      html: template.html,
+      text: template.text,
+      notificationId: options?.notificationId,
+      userId: options?.userId,
+    });
+  }
+
+  /**
+   * Daily Check-in Reminder Email
+   */
+  public static async sendCheckInReminder(
+    to: string,
+    data: CheckInReminderTemplateData,
+    options?: { notificationId?: string; userId?: string }
+  ): Promise<EmailSendResult> {
+    const template = checkInReminderTemplate(data);
+    return this.sendEmail({
+      to,
+      subject: template.subject,
+      html: template.html,
+      text: template.text,
+      notificationId: options?.notificationId,
+      userId: options?.userId,
+    });
+  }
+
+  /**
+   * Scheduled Checkout Reminder Email
+   */
+  public static async sendCheckOutReminder(
+    to: string,
+    data: CheckOutReminderTemplateData,
+    options?: { notificationId?: string; userId?: string }
+  ): Promise<EmailSendResult> {
+    const template = checkOutReminderTemplate(data);
+    return this.sendEmail({
+      to,
+      subject: template.subject,
+      html: template.html,
+      text: template.text,
+      notificationId: options?.notificationId,
+      userId: options?.userId,
+    });
+  }
+
+  /**
+   * 8-Hour Checkout Reminder Email
+   */
+  public static async sendEightHourCheckoutReminder(
+    to: string,
+    data: EightHourCheckoutReminderTemplateData,
+    options?: { notificationId?: string; userId?: string }
+  ): Promise<EmailSendResult> {
+    const template = eightHourCheckoutReminderTemplate(data);
+    return this.sendEmail({
+      to,
+      subject: template.subject,
+      html: template.html,
+      text: template.text,
+      notificationId: options?.notificationId,
+      userId: options?.userId,
+    });
+  }
+
+  /**
+   * 30-Minute Repeated Checkout Reminder Email
+   */
+  public static async sendThirtyMinuteCheckoutReminder(
+    to: string,
+    data: ThirtyMinuteCheckoutReminderTemplateData,
+    options?: { notificationId?: string; userId?: string }
+  ): Promise<EmailSendResult> {
+    const template = thirtyMinuteCheckoutReminderTemplate(data);
+    return this.sendEmail({
+      to,
+      subject: template.subject,
+      html: template.html,
+      text: template.text,
+      notificationId: options?.notificationId,
+      userId: options?.userId,
+    });
+  }
+
+  /**
+   * Tomorrow is Holiday Notification Email
+   */
+  public static async sendTomorrowHoliday(
+    to: string,
+    data: TomorrowHolidayTemplateData,
+    options?: { notificationId?: string; userId?: string }
+  ): Promise<EmailSendResult> {
+    const template = tomorrowHolidayTemplate(data);
+    return this.sendEmail({
+      to,
+      subject: template.subject,
+      html: template.html,
+      text: template.text,
+      notificationId: options?.notificationId,
+      userId: options?.userId,
+    });
+  }
+
+  /**
+   * Task Deadline Approaching Email
+   */
+  public static async sendTaskDeadlineReminder(
+    to: string,
+    data: TaskDeadlineTemplateData,
+    options?: { notificationId?: string; userId?: string }
+  ): Promise<EmailSendResult> {
+    const template = taskDeadlineTemplate(data);
+    return this.sendEmail({
+      to,
+      subject: template.subject,
+      html: template.html,
+      text: template.text,
+      notificationId: options?.notificationId,
+      userId: options?.userId,
+    });
+  }
+
+  /**
+   * Scheduled Task Reminder Email
+   */
+  public static async sendScheduledTaskReminder(
+    to: string,
+    data: ScheduledTaskTemplateData,
+    options?: { notificationId?: string; userId?: string }
+  ): Promise<EmailSendResult> {
+    const template = scheduledTaskTemplate(data);
+    return this.sendEmail({
+      to,
+      subject: template.subject,
+      html: template.html,
+      text: template.text,
+      notificationId: options?.notificationId,
+      userId: options?.userId,
+    });
+  }
+
+  /**
+   * Long-Running Timer Warning Email
+   */
+  public static async sendLongRunningTimerWarning(
+    to: string,
+    data: LongRunningTimerTemplateData,
+    options?: { notificationId?: string; userId?: string }
+  ): Promise<EmailSendResult> {
+    const template = longRunningTimerTemplate(data);
     return this.sendEmail({
       to,
       subject: template.subject,

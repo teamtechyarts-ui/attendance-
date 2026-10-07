@@ -19,13 +19,20 @@ export class WorkdayService {
     employeeId: string,
     dateString: string = DateTimeUtil.getTodayDateString()
   ): Promise<WorkdayEvaluation> {
+    const cleanDateStr = dateString.slice(0, 10);
+    const startOfDay = new Date(`${cleanDateStr}T00:00:00.000Z`);
+    const endOfDay = new Date(`${cleanDateStr}T23:59:59.999Z`);
+
     return DbService.query(
       async () => {
         // 1. Check if date is a holiday
-        const cleanDateStr = dateString.slice(0, 10);
-        const dateObj = new Date(`${cleanDateStr}T00:00:00.000Z`);
         const holiday = await prisma.holiday.findFirst({
-          where: { holidayDate: dateObj },
+          where: {
+            holidayDate: {
+              gte: startOfDay,
+              lte: endOfDay,
+            },
+          },
         });
 
         if (holiday) {
@@ -41,10 +48,10 @@ export class WorkdayService {
         const empSchedule = await prisma.employeeWorkSchedule.findFirst({
           where: {
             employeeId,
-            effectiveFrom: { lte: dateObj },
+            effectiveFrom: { lte: startOfDay },
             OR: [
               { effectiveTo: null },
-              { effectiveTo: { gte: dateObj } },
+              { effectiveTo: { gte: startOfDay } },
             ],
           },
           include: { schedule: true },
@@ -63,7 +70,7 @@ export class WorkdayService {
 
         if (!schedule) {
           // Fallback Mon-Fri
-          const dayOfWeek = DateTimeUtil.getDayOfWeek(dateString);
+          const dayOfWeek = DateTimeUtil.getDayOfWeek(cleanDateStr);
           const isWeekend = dayOfWeek === 'saturday' || dayOfWeek === 'sunday';
           return {
             isWorkingDay: !isWeekend,
@@ -72,7 +79,7 @@ export class WorkdayService {
           };
         }
 
-        const dayOfWeek = DateTimeUtil.getDayOfWeek(dateString);
+        const dayOfWeek = DateTimeUtil.getDayOfWeek(cleanDateStr);
         const isWorkingDay = (schedule as any)[dayOfWeek] === true;
 
         return {
@@ -84,7 +91,7 @@ export class WorkdayService {
       },
       async () => {
         // REST Fallback
-        const holidays = await DbService.restRequest<any[]>(`/holidays?holiday_date=eq.${dateString}`);
+        const holidays = await DbService.restRequest<any[]>(`/holidays?holiday_date=gte.${cleanDateStr}&holiday_date=lte.${cleanDateStr}`);
         if (holidays && holidays.length > 0) {
           return {
             isWorkingDay: false,
@@ -96,7 +103,7 @@ export class WorkdayService {
 
         const schedules = await DbService.restRequest<any[]>(`/work_schedules?is_default=eq.true`);
         const schedule = schedules?.[0];
-        const dayOfWeek = DateTimeUtil.getDayOfWeek(dateString);
+        const dayOfWeek = DateTimeUtil.getDayOfWeek(cleanDateStr);
         const isWorkingDay = schedule ? schedule[dayOfWeek] === true : (dayOfWeek !== 'saturday' && dayOfWeek !== 'sunday');
 
         return {
@@ -118,8 +125,10 @@ export class WorkdayService {
     startDateStr: string,
     endDateStr: string
   ): Promise<Map<string, Map<string, WorkdayEvaluation>>> {
-    const startObj = new Date(startDateStr);
-    const endObj = new Date(endDateStr);
+    const cleanStartStr = startDateStr.slice(0, 10);
+    const cleanEndStr = endDateStr.slice(0, 10);
+    const startObj = new Date(`${cleanStartStr}T00:00:00.000Z`);
+    const endObj = new Date(`${cleanEndStr}T23:59:59.999Z`);
 
     return DbService.query(
       async () => {
@@ -141,7 +150,12 @@ export class WorkdayService {
 
         const holidayMap = new Map<string, string>();
         for (const h of holidays) {
-          const dStr = DateTimeUtil.formatDateString(new Date(h.holidayDate));
+          const raw = h.holidayDate as any;
+          const dStr = typeof raw === 'string'
+            ? raw.slice(0, 10)
+            : (raw instanceof Date
+                ? raw.toISOString().slice(0, 10)
+                : DateTimeUtil.formatDateString(new Date(raw)));
           holidayMap.set(dStr, h.name);
         }
 
@@ -160,7 +174,7 @@ export class WorkdayService {
 
           let current = new Date(startObj);
           while (current <= endObj) {
-            const dateStr = DateTimeUtil.formatDateString(current);
+            const dateStr = current.toISOString().slice(0, 10);
             const holidayName = holidayMap.get(dateStr);
 
             if (holidayName) {
@@ -200,14 +214,19 @@ export class WorkdayService {
       },
       async () => {
         const [holidays, schedules] = await Promise.all([
-          DbService.restRequest<any[]>(`/holidays?holiday_date=gte.${startDateStr}&holiday_date=lte.${endDateStr}`),
+          DbService.restRequest<any[]>(`/holidays?holiday_date=gte.${cleanStartStr}&holiday_date=lte.${cleanEndStr}`),
           DbService.restRequest<any[]>(`/work_schedules?is_default=eq.true`),
         ]);
 
         const defaultSchedule = schedules?.[0];
         const holidayMap = new Map<string, string>();
         for (const h of holidays || []) {
-          const dStr = typeof h.holiday_date === 'string' ? h.holiday_date.slice(0, 10) : DateTimeUtil.formatDateString(new Date(h.holiday_date));
+          const raw = h.holiday_date || h.holidayDate;
+          const dStr = typeof raw === 'string'
+            ? raw.slice(0, 10)
+            : (raw instanceof Date
+                ? raw.toISOString().slice(0, 10)
+                : DateTimeUtil.formatDateString(new Date(raw)));
           holidayMap.set(dStr, h.name);
         }
 
@@ -217,7 +236,7 @@ export class WorkdayService {
           const dayMap = new Map<string, WorkdayEvaluation>();
           let current = new Date(startObj);
           while (current <= endObj) {
-            const dateStr = DateTimeUtil.formatDateString(current);
+            const dateStr = current.toISOString().slice(0, 10);
             const holidayName = holidayMap.get(dateStr);
 
             if (holidayName) {

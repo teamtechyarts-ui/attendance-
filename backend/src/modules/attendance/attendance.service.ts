@@ -6,6 +6,7 @@ import { AuditService } from '../../services/audit.service.js';
 import { CheckInInput, CheckOutInput } from '../../validation/index.js';
 import { LiveEmployeeActivity, AdminDashboardMetrics, AttendanceStatus, WorkMode } from '../../types/index.js';
 import { TaskService } from '../tasks/task.service.js';
+import { LeaveService } from '../leave/leave.service.js';
 import { NotificationService } from '../notifications/notification.service.js';
 import { invalidateAuthSession, invalidateUserAuthSessions } from '../../middleware/auth.js';
 
@@ -66,12 +67,14 @@ export class AttendanceService {
     // Workday evaluation
     const workday = await WorkdayService.evaluateDayForEmployee(employeeId, todayStr);
 
-    // Determine status (LATE or PRESENT) authoritatively using work schedule and 15-minute grace threshold
-    const status: AttendanceStatus = DateTimeUtil.calculateAttendanceStatus(
-      now,
-      workday.schedule,
-      15
-    );
+    // Determine status (WORKED_ON_HOLIDAY if holiday, otherwise LATE or PRESENT using work schedule and 15-minute grace threshold)
+    const status: AttendanceStatus = workday.isHoliday
+      ? 'WORKED_ON_HOLIDAY'
+      : DateTimeUtil.calculateAttendanceStatus(
+          now,
+          workday.schedule,
+          15
+        );
 
     const result = await DbService.query(
       async () => {
@@ -94,32 +97,33 @@ export class AttendanceService {
           }
 
           // Create or update attendance record
+          const dbStatus = (status === 'WORKED_ON_HOLIDAY' ? 'PRESENT' : status) as any;
           const attendance = existing
             ? await tx.attendance.update({
                 where: { id: existing.id },
                 data: {
-                  status,
+                  status: dbStatus,
                   workMode: input.workMode as any,
                   verificationMethod: input.verificationMethod as any,
                   checkInAt: now,
                   checkInLatitude: input.latitude ? (input.latitude as any) : null,
                   checkInLongitude: input.longitude ? (input.longitude as any) : null,
                   deviceId: input.deviceId || null,
-                  notes: input.notes || null,
+                  notes: status === 'WORKED_ON_HOLIDAY' ? `[WORKED_ON_HOLIDAY]\n${input.notes || ''}`.trim() : (input.notes || null),
                 },
               })
             : await tx.attendance.create({
                 data: {
                   employeeId,
                   attendanceDate: new Date(todayStr),
-                  status,
+                  status: dbStatus,
                   workMode: input.workMode as any,
                   verificationMethod: input.verificationMethod as any,
                   checkInAt: now,
                   checkInLatitude: input.latitude ? (input.latitude as any) : null,
                   checkInLongitude: input.longitude ? (input.longitude as any) : null,
                   deviceId: input.deviceId || null,
-                  notes: input.notes || null,
+                  notes: status === 'WORKED_ON_HOLIDAY' ? `[WORKED_ON_HOLIDAY]\n${input.notes || ''}`.trim() : (input.notes || null),
                 },
               });
 
@@ -379,18 +383,48 @@ export class AttendanceService {
             });
           }
 
+          // Workday evaluation for holiday & duration policy
+          const workday = await WorkdayService.evaluateDayForEmployee(employeeId, todayStr);
+          const isHolidayWork = workday.isHoliday || attendance.notes?.includes('[WORKED_ON_HOLIDAY]');
+          let finalStatus: AttendanceStatus = attendance.status;
+          let earnedLeaveCredited = 0;
+
+          if (isHolidayWork) {
+            finalStatus = 'WORKED_ON_HOLIDAY';
+            if (totalWorkMinutes >= 390) {
+              // 6h 30m or more -> 1.0 Earned Leave
+              await LeaveService.creditEarnedLeaveForHolidayWork(employeeId, todayStr, 1.0, userId, totalWorkMinutes);
+              earnedLeaveCredited = 1.0;
+            } else if (totalWorkMinutes >= 240) {
+              // 4h to 6h 29m -> 0.5 Earned Leave (half day)
+              await LeaveService.creditEarnedLeaveForHolidayWork(employeeId, todayStr, 0.5, userId, totalWorkMinutes);
+              earnedLeaveCredited = 0.5;
+            }
+          } else {
+            // Normal workday: if actual work is below 6h30m (390 min), classify as HALF_DAY
+            if (totalWorkMinutes < 390 && (attendance.status === 'PRESENT' || attendance.status === 'LATE')) {
+              finalStatus = 'HALF_DAY';
+            }
+          }
+
+          const dbStatus = (finalStatus === 'WORKED_ON_HOLIDAY' ? 'PRESENT' : finalStatus) as any;
+          const updatedNotes = isHolidayWork && !attendance.notes?.includes('[WORKED_ON_HOLIDAY]')
+            ? `[WORKED_ON_HOLIDAY]\n${input.notes ? `${attendance.notes || ''}\n${input.notes}` : (attendance.notes || '')}`.trim()
+            : (input.notes ? `${attendance.notes || ''}\n${input.notes}`.trim() : attendance.notes);
+
           const updated = await tx.attendance.update({
             where: { id: attendance.id },
             data: {
+              status: dbStatus,
               checkOutAt: now,
               totalWorkMinutes,
               checkOutLatitude: input.latitude ? (input.latitude as any) : null,
               checkOutLongitude: input.longitude ? (input.longitude as any) : null,
-              notes: input.notes ? `${attendance.notes || ''}\n${input.notes}`.trim() : attendance.notes,
+              notes: updatedNotes || null,
             },
           });
 
-          console.log(`[AUTH] AUTH_WORK_SESSION_ENDED: userId=${userId}, employeeId=${employeeId}, attendanceId=${attendance.id}, totalWorkMinutes=${totalWorkMinutes}, timestamp=${now.toISOString()}`);
+          console.log(`[AUTH] AUTH_WORK_SESSION_ENDED: userId=${userId}, employeeId=${employeeId}, attendanceId=${attendance.id}, totalWorkMinutes=${totalWorkMinutes}, earnedLeaveCredited=${earnedLeaveCredited}, timestamp=${now.toISOString()}`);
 
           await AuditService.log({
             userId,
@@ -398,13 +432,14 @@ export class AttendanceService {
             action: 'ATTENDANCE_CHECK_OUT',
             entityType: 'attendance',
             entityId: attendance.id,
-            description: `Checked out for ${todayStr} (Duration: ${totalWorkMinutes} mins, Timers stopped: ${timersAutoStopped})`,
+            description: `Checked out for ${todayStr} (Duration: ${totalWorkMinutes} mins, Status: ${finalStatus}, Earned Leave: ${earnedLeaveCredited}, Timers stopped: ${timersAutoStopped})`,
             ipAddress: clientInfo.ipAddress,
             userAgent: clientInfo.userAgent,
           });
 
           return {
             ...updated,
+            earnedLeaveCredited,
             timersAutoStopped,
           };
         });
@@ -508,15 +543,36 @@ export class AttendanceService {
           }
         }
 
+        // Workday evaluation for holiday & duration policy
+        const workday = await WorkdayService.evaluateDayForEmployee(employeeId, todayStr);
+        let finalStatus = attendance.status;
+        let earnedLeaveCredited = 0;
+
+        if (workday.isHoliday || attendance.status === 'WORKED_ON_HOLIDAY') {
+          finalStatus = 'WORKED_ON_HOLIDAY';
+          if (totalWorkMinutes >= 390) {
+            await LeaveService.creditEarnedLeaveForHolidayWork(employeeId, todayStr, 1.0, userId, totalWorkMinutes);
+            earnedLeaveCredited = 1.0;
+          } else if (totalWorkMinutes >= 240) {
+            await LeaveService.creditEarnedLeaveForHolidayWork(employeeId, todayStr, 0.5, userId, totalWorkMinutes);
+            earnedLeaveCredited = 0.5;
+          }
+        } else {
+          if (totalWorkMinutes < 390 && (attendance.status === 'PRESENT' || attendance.status === 'LATE')) {
+            finalStatus = 'HALF_DAY';
+          }
+        }
+
         const updated = await DbService.restRequest(`/attendance?id=eq.${attendance.id}`, {
           method: 'PATCH',
           body: {
+            status: finalStatus,
             check_out_at: now.toISOString(),
             total_work_minutes: totalWorkMinutes,
           },
         });
 
-        console.log(`[AUTH] AUTH_WORK_SESSION_ENDED: userId=${userId}, employeeId=${employeeId}, attendanceId=${attendance.id}, totalWorkMinutes=${totalWorkMinutes}, timestamp=${now.toISOString()}`);
+        console.log(`[AUTH] AUTH_WORK_SESSION_ENDED: userId=${userId}, employeeId=${employeeId}, attendanceId=${attendance.id}, totalWorkMinutes=${totalWorkMinutes}, earnedLeaveCredited=${earnedLeaveCredited}, timestamp=${now.toISOString()}`);
 
         await AuditService.log({
           userId,
@@ -524,13 +580,14 @@ export class AttendanceService {
           action: 'ATTENDANCE_CHECK_OUT',
           entityType: 'attendance',
           entityId: attendance.id,
-          description: `Checked out for ${todayStr} (Duration: ${totalWorkMinutes} mins, Timers stopped: ${timersAutoStopped})`,
+          description: `Checked out for ${todayStr} (Duration: ${totalWorkMinutes} mins, Status: ${finalStatus}, Earned Leave: ${earnedLeaveCredited}, Timers stopped: ${timersAutoStopped})`,
           ipAddress: clientInfo.ipAddress,
           userAgent: clientInfo.userAgent,
         });
 
         return {
           ...updated[0],
+          earnedLeaveCredited,
           timersAutoStopped,
         };
       }
@@ -1208,7 +1265,7 @@ export class AttendanceService {
             // Authoritative Status Resolution (Only historical & today records exist)
             let status: AttendanceStatus | 'LEAVE' | 'OFF';
             if (evalResult.isHoliday) {
-              status = att?.checkInAt ? (att.status as AttendanceStatus) : 'HOLIDAY';
+              status = att?.checkInAt ? (att.status === 'WORKED_ON_HOLIDAY' ? 'WORKED_ON_HOLIDAY' : 'WORKED_ON_HOLIDAY') : 'HOLIDAY';
             } else if (!evalResult.isWorkingDay) {
               status = att?.checkInAt ? (att.status as AttendanceStatus) : 'OFF';
             } else if (matchingLeave) {
@@ -1228,7 +1285,7 @@ export class AttendanceService {
               summaryWorkingDays++;
             }
 
-            if (status === 'PRESENT') {
+            if (status === 'PRESENT' || status === 'WORKED_ON_HOLIDAY') {
               summaryPresent++;
             } else if (status === 'LATE') {
               summaryLate++;
@@ -1394,7 +1451,7 @@ export class AttendanceService {
 
             let status: AttendanceStatus | 'LEAVE' | 'OFF';
             if (evalResult.isHoliday) {
-              status = att?.checkInAt ? att.status : 'HOLIDAY';
+              status = att?.checkInAt ? (att.status === 'WORKED_ON_HOLIDAY' ? 'WORKED_ON_HOLIDAY' : 'WORKED_ON_HOLIDAY') : 'HOLIDAY';
             } else if (!evalResult.isWorkingDay) {
               status = att?.checkInAt ? att.status : 'OFF';
             } else if (matchingLeave) {
@@ -1413,7 +1470,7 @@ export class AttendanceService {
               summaryWorkingDays++;
             }
 
-            if (status === 'PRESENT') {
+            if (status === 'PRESENT' || status === 'WORKED_ON_HOLIDAY') {
               summaryPresent++;
             } else if (status === 'LATE') {
               summaryLate++;
@@ -1484,6 +1541,399 @@ export class AttendanceService {
           },
         };
       }
+    );
+  }
+
+  /**
+   * Overtime Confirmation (Part 13 & 14)
+   * Stored server-authoritatively
+   */
+  public static async confirmOvertime(
+    employeeId: string,
+    userId: string,
+    clientInfo?: { ipAddress?: string; userAgent?: string }
+  ) {
+    const todayStr = DateTimeUtil.getTodayDateString();
+    const key = `overtime_${employeeId}_${todayStr}`;
+    const now = new Date();
+
+    const record = {
+      employeeId,
+      date: todayStr,
+      confirmed: true,
+      confirmedAt: now.toISOString(),
+      userId,
+    };
+
+    await DbService.query(
+      async () => {
+        await prisma.systemSetting.upsert({
+          where: { settingKey: key },
+          create: {
+            settingKey: key,
+            settingValue: record,
+            description: `Overtime confirmation for employee ${employeeId} on ${todayStr}`,
+          },
+          update: {
+            settingValue: record,
+            updatedAt: now,
+          },
+        });
+
+        const att = await prisma.attendance.findUnique({
+          where: {
+            employeeId_attendanceDate: {
+              employeeId,
+              attendanceDate: new Date(todayStr),
+            },
+          },
+        });
+        if (att) {
+          const updatedNotes = att.notes
+            ? `${att.notes}\n[OVERTIME_CONFIRMED: ${now.toISOString()}]`
+            : `[OVERTIME_CONFIRMED: ${now.toISOString()}]`;
+          await prisma.attendance.update({
+            where: { id: att.id },
+            data: { notes: updatedNotes },
+          });
+        }
+
+        await AuditService.log({
+          userId,
+          employeeId,
+          action: 'UPDATE',
+          entityType: 'attendance',
+          entityId: att?.id || employeeId,
+          description: `Overtime confirmed for ${todayStr}`,
+          ipAddress: clientInfo?.ipAddress,
+          userAgent: clientInfo?.userAgent,
+        });
+
+        return record;
+      },
+      async () => {
+        const existing = await DbService.restRequest<any[]>(`/system_settings?setting_key=eq.${key}`);
+        if (existing && existing.length > 0) {
+          await DbService.restRequest(`/system_settings?setting_key=eq.${key}`, {
+            method: 'PATCH',
+            body: {
+              setting_value: record,
+              updated_at: now.toISOString(),
+            },
+          });
+        } else {
+          await DbService.restRequest(`/system_settings`, {
+            method: 'POST',
+            body: {
+              setting_key: key,
+              setting_value: record,
+              description: `Overtime confirmation for employee ${employeeId} on ${todayStr}`,
+            },
+          });
+        }
+        return record;
+      }
+    );
+
+    return { success: true, overtimeConfirmed: true, date: todayStr };
+  }
+
+  /**
+   * Check if overtime is confirmed for an employee on a given date
+   */
+  public static async isOvertimeConfirmed(employeeId: string, dateStr: string): Promise<boolean> {
+    const key = `overtime_${employeeId}_${dateStr}`;
+    return DbService.query(
+      async () => {
+        const setting = await prisma.systemSetting.findUnique({
+          where: { settingKey: key },
+        });
+        if (setting) {
+          const val = typeof setting.settingValue === 'string' ? JSON.parse(setting.settingValue) : setting.settingValue;
+          if (val && (val.confirmed === true || val.overtimeConfirmed === true)) {
+            return true;
+          }
+        }
+        const att = await prisma.attendance.findUnique({
+          where: {
+            employeeId_attendanceDate: {
+              employeeId,
+              attendanceDate: new Date(dateStr),
+            },
+          },
+        });
+        if (att && att.notes && att.notes.includes('[OVERTIME_CONFIRMED')) {
+          return true;
+        }
+        return false;
+      },
+      async () => {
+        const settings = await DbService.restRequest<any[]>(`/system_settings?setting_key=eq.${key}`);
+        const item = settings?.[0];
+        if (item) {
+          const rawVal = item.setting_value ?? item.settingValue;
+          const val = typeof rawVal === 'string' ? JSON.parse(rawVal) : rawVal;
+          if (val && (val.confirmed === true || val.overtimeConfirmed === true)) return true;
+        }
+        const atts = await DbService.restRequest<any[]>(`/attendance?employee_id=eq.${employeeId}&attendance_date=eq.${dateStr}`);
+        const notes = atts?.[0]?.notes;
+        if (notes && notes.includes('[OVERTIME_CONFIRMED')) return true;
+        return false;
+      }
+    );
+  }
+
+  /**
+   * Auto-stop running task timers & Auto-checkout attendance at business date rollover (Asia/Kolkata)
+   */
+  public static async processDateRolloverAutoCheckout() {
+    const todayStr = DateTimeUtil.getTodayDateString();
+    const todayDate = new Date(todayStr);
+
+    return DbService.query(
+      async () => {
+        const openAttendances = await prisma.attendance.findMany({
+          where: {
+            attendanceDate: { lt: todayDate },
+            checkInAt: { not: null },
+            checkOutAt: null,
+          },
+          include: {
+            employee: true,
+            sessions: true,
+          },
+        });
+
+        const results: any[] = [];
+
+        for (const att of openAttendances) {
+          const empId = att.employeeId;
+          const rawAttDate: any = att.attendanceDate;
+          const attDateStr = typeof rawAttDate === 'string' ? rawAttDate.slice(0, 10) : DateTimeUtil.formatDateString(rawAttDate);
+          const cutoffTime = new Date(`${attDateStr}T23:59:59.999+05:30`);
+
+          // 1. Auto stop active task timers for this employee
+          const activeTimers = await prisma.taskTimer.findMany({
+            where: { employeeId: empId, isActive: true },
+            include: { task: true },
+          });
+
+          for (const timer of activeTimers) {
+            const timerStart = timer.startedAt;
+            const stopAt = timerStart < cutoffTime ? cutoffTime : timerStart;
+            const diff = Math.max(0, DateTimeUtil.diffSeconds(timerStart, stopAt));
+            await prisma.taskTimer.update({
+              where: { id: timer.id },
+              data: {
+                endedAt: stopAt,
+                pausedAt: stopAt,
+                durationSeconds: (timer.durationSeconds || 0) + diff,
+                isActive: false,
+              },
+            });
+
+            if (timer.task && timer.task.status === 'IN_PROGRESS') {
+              await prisma.task.update({
+                where: { id: timer.taskId },
+                data: { status: 'PAUSED' },
+              });
+            }
+
+            await AuditService.log({
+              userId: att.employee.userId || empId,
+              employeeId: empId,
+              action: 'TASK_PAUSED',
+              entityType: 'task',
+              entityId: timer.taskId,
+              description: `Task timer auto-stopped at midnight rollover for date ${attDateStr}`,
+            });
+          }
+
+          // 2. Close active attendance sessions
+          for (const s of att.sessions) {
+            if (!s.endedAt) {
+              const sStart = s.startedAt;
+              const sEnd = sStart < cutoffTime ? cutoffTime : sStart;
+              const sSec = Math.max(0, DateTimeUtil.diffSeconds(sStart, sEnd));
+              await prisma.attendanceSession.update({
+                where: { id: s.id },
+                data: {
+                  endedAt: sEnd,
+                  durationMinutes: Math.floor(sSec / 60),
+                },
+              });
+            }
+          }
+
+          // 3. Compute total work minutes
+          const allSessions = await prisma.attendanceSession.findMany({
+            where: { attendanceId: att.id },
+          });
+          let totalMinutes = 0;
+          for (const s of allSessions) {
+            totalMinutes += s.durationMinutes || 0;
+          }
+          if (totalMinutes === 0 && att.checkInAt) {
+            totalMinutes = Math.floor(Math.max(0, DateTimeUtil.diffSeconds(att.checkInAt, cutoffTime)) / 60);
+          }
+
+          // 4. Determine status & Holiday Earned Leave
+          const workday = await WorkdayService.evaluateDayForEmployee(empId, attDateStr);
+          const isHolidayWork = workday.isHoliday || att.notes?.includes('[WORKED_ON_HOLIDAY]');
+          let finalStatus: AttendanceStatus = att.status;
+
+          if (isHolidayWork) {
+            finalStatus = 'WORKED_ON_HOLIDAY';
+            if (totalMinutes >= 390) {
+              await LeaveService.creditEarnedLeaveForHolidayWork(empId, attDateStr, 1.0, att.employee.userId || empId, totalMinutes);
+            } else if (totalMinutes >= 240) {
+              await LeaveService.creditEarnedLeaveForHolidayWork(empId, attDateStr, 0.5, att.employee.userId || empId, totalMinutes);
+            }
+          } else {
+            if (totalMinutes < 390 && (att.status === 'PRESENT' || att.status === 'LATE')) {
+              finalStatus = 'HALF_DAY';
+            }
+          }
+
+          const dbStatus = (finalStatus === 'WORKED_ON_HOLIDAY' ? 'PRESENT' : finalStatus) as any;
+
+          // 5. Update attendance record
+          await prisma.attendance.update({
+            where: { id: att.id },
+            data: {
+              checkOutAt: cutoffTime,
+              totalWorkMinutes: totalMinutes,
+              status: dbStatus,
+              notes: att.notes ? `${att.notes}\n[AUTO_CHECKOUT_DATE_ROLLOVER: ${cutoffTime.toISOString()}]` : `[AUTO_CHECKOUT_DATE_ROLLOVER: ${cutoffTime.toISOString()}]`,
+            },
+          });
+
+          await AuditService.log({
+            userId: att.employee.userId || empId,
+            employeeId: empId,
+            action: 'ATTENDANCE_CHECK_OUT',
+            entityType: 'attendance',
+            entityId: att.id,
+            description: `Auto-checkout at date rollover for ${attDateStr} (Total: ${totalMinutes} mins, Status: ${finalStatus})`,
+          });
+
+          results.push({
+            employeeId: empId,
+            attendanceDate: attDateStr,
+            totalWorkMinutes: totalMinutes,
+            status: finalStatus,
+          });
+        }
+
+        return results;
+      },
+      async () => {
+        const openAtts = await DbService.restRequest<any[]>(
+          `/attendance?attendance_date=lt.${todayStr}&check_out_at=is.null&select=*,employee:employees(*)`
+        );
+        const results: any[] = [];
+        for (const att of (openAtts || [])) {
+          const empId = att.employee_id || att.employeeId;
+          const rawDate = att.attendance_date || att.attendanceDate;
+          const attDateStr = typeof rawDate === 'string' ? rawDate.slice(0, 10) : DateTimeUtil.formatDateString(rawDate);
+          const cutoffTime = new Date(`${attDateStr}T23:59:59.999+05:30`);
+
+          const activeTimers = await DbService.restRequest<any[]>(
+            `/task_timers?employee_id=eq.${empId}&is_active=eq.true`
+          );
+          for (const t of (activeTimers || [])) {
+            await DbService.restRequest(`/task_timers?id=eq.${t.id}`, {
+              method: 'PATCH',
+              body: {
+                is_active: false,
+                ended_at: cutoffTime.toISOString(),
+                paused_at: cutoffTime.toISOString(),
+              },
+            });
+          }
+
+          await DbService.restRequest(`/attendance?id=eq.${att.id}`, {
+            method: 'PATCH',
+            body: {
+              check_out_at: cutoffTime.toISOString(),
+              total_work_minutes: 480,
+            },
+          });
+          results.push({ employeeId: empId, attendanceDate: attDateStr });
+        }
+        return results;
+      }
+    );
+  }
+
+  /**
+   * Reconcile running timers when attendance is checked out or not active
+   */
+  public static async reconcileMismatchedTimers() {
+    const todayStr = DateTimeUtil.getTodayDateString();
+    const now = new Date();
+
+    return DbService.query(
+      async () => {
+        const activeTimers = await prisma.taskTimer.findMany({
+          where: { isActive: true },
+          include: {
+            employee: true,
+            task: true,
+          },
+        });
+
+        const reconciled: any[] = [];
+
+        for (const timer of activeTimers) {
+          const empId = timer.employeeId;
+          const att = await prisma.attendance.findUnique({
+            where: {
+              employeeId_attendanceDate: {
+                employeeId: empId,
+                attendanceDate: new Date(todayStr),
+              },
+            },
+          });
+
+          // Mismatch: No attendance checkin OR attendance is checked out
+          if (!att || !att.checkInAt || att.checkOutAt) {
+            const stopAt = att?.checkOutAt || now;
+            const diff = Math.max(0, DateTimeUtil.diffSeconds(timer.startedAt, stopAt));
+
+            await prisma.taskTimer.update({
+              where: { id: timer.id },
+              data: {
+                endedAt: stopAt,
+                pausedAt: stopAt,
+                durationSeconds: (timer.durationSeconds || 0) + diff,
+                isActive: false,
+              },
+            });
+
+            if (timer.task && timer.task.status === 'IN_PROGRESS') {
+              await prisma.task.update({
+                where: { id: timer.taskId },
+                data: { status: 'PAUSED' },
+              });
+            }
+
+            await AuditService.log({
+              userId: timer.employee?.userId || empId,
+              employeeId: empId,
+              action: 'TASK_PAUSED',
+              entityType: 'task',
+              entityId: timer.taskId,
+              description: `Timer reconciled (stopped) due to checked-out attendance state`,
+            });
+
+            reconciled.push({ timerId: timer.id, employeeId: empId });
+          }
+        }
+
+        return reconciled;
+      },
+      async () => []
     );
   }
 }

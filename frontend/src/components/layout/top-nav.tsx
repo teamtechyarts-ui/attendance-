@@ -11,6 +11,8 @@ import { CheckInModal } from '@/components/attendance/check-in-modal';
 import { NotificationPopover } from '@/components/notifications/notification-popover';
 import { formatSecondsToTime } from '@/lib/utils';
 import { isSuperAdmin, isLimitedAdmin, getPermittedAdminModules } from '@/lib/permissions';
+import { useCollaboration } from '@/hooks/use-collaboration';
+import { PresenceSelector } from '@/components/collaboration/presence-selector';
 import {
   Briefcase,
   Calendar,
@@ -57,8 +59,9 @@ const ICON_MAP: Record<string, LucideIcon> = {
 export function TopNav() {
   const pathname = usePathname();
   const router = useRouter();
-  const { user, accessMode, todayAttendance, logout } = useAuth();
+  const { user, accessMode, todayAttendance, isAttendanceLoading, isAttendanceResolved, logout } = useAuth();
   const { activeTimer, elapsedSeconds, startTimer, pauseTimer, stopTimer } = useTaskTimer();
+  const { presence, setUserStatus, totalUnreadCount } = useCollaboration();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isCheckInOpen, setIsCheckInOpen] = useState(false);
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
@@ -73,9 +76,11 @@ export function TopNav() {
   const isInSuperAdminView = pathname.startsWith('/admin') && !isInAdminView;
   const isInEmployeeView = !isInAdminView && !isInSuperAdminView;
 
-  // Base Employee Navigation (Strictly 7 items for all employees in employee mode)
+  // Base Employee Navigation (Includes People and Chat)
   const baseEmployeeNav = [
     { label: 'Home', href: '/dashboard', icon: Home },
+    { label: 'People', href: '/people', icon: Users },
+    { label: 'Chat', href: '/chat', icon: MessageSquare, badge: totalUnreadCount },
     { label: 'Tasks', href: '/tasks', icon: Briefcase },
     { label: 'Calendar', href: '/calendar', icon: Calendar },
     { label: 'Attendance', href: '/attendance', icon: Clock },
@@ -88,6 +93,7 @@ export function TopNav() {
   const superAdminNav = [
     { label: 'Overview', href: '/admin/dashboard', icon: BarChart2 },
     { label: 'People', href: '/admin/employees', icon: Users },
+    { label: 'Chat', href: '/chat', icon: MessageSquare, badge: totalUnreadCount },
     { label: 'Work', href: '/admin/tasks', icon: Briefcase },
     { label: 'Attendance', href: '/admin/attendance', icon: Clock },
     { label: 'Leave', href: '/admin/leave', icon: Calendar },
@@ -99,11 +105,15 @@ export function TopNav() {
 
   // Limited Admin Navigation (Dynamic based on permissions)
   const permittedModules = getPermittedAdminModules(user);
-  const limitedAdminNav = permittedModules.map((mod) => ({
-    label: mod.label,
-    href: mod.href,
-    icon: ICON_MAP[mod.iconName] || Briefcase,
-  }));
+  const limitedAdminNav = [
+    ...permittedModules.map((mod) => ({
+      label: mod.label,
+      href: mod.href,
+      icon: ICON_MAP[mod.iconName] || Briefcase,
+      badge: 0,
+    })),
+    { label: 'Chat', href: '/chat', icon: MessageSquare, badge: totalUnreadCount },
+  ];
 
   let navItems = baseEmployeeNav;
   let logoHref = '/dashboard';
@@ -119,7 +129,7 @@ export function TopNav() {
   return (
     <>
       <header className="sticky top-0 z-40 w-full border-b border-neutral-200 bg-white shadow-[0_1px_2px_rgba(0,0,0,0.03)]">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 flex items-center justify-between h-14">
+        <div className="w-full max-w-[1600px] 2xl:max-w-[1720px] mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between h-14">
           {/* Logo & Desktop Nav */}
           <div className="flex items-center gap-8">
             <Link href={logoHref} className="flex items-center gap-2.5">
@@ -144,12 +154,13 @@ export function TopNav() {
                 const Icon = item.icon;
                 const isExactRoot = item.href === '/dashboard' || item.href === '/admin/dashboard' || item.href === '/admin-view';
                 const isActive = isExactRoot ? pathname === item.href : pathname === item.href || pathname.startsWith(item.href + '/');
+                const badge = (item as any).badge || 0;
 
                 return (
                   <Link
                     key={item.href}
                     href={item.href}
-                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold tracking-tight transition-colors ${
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold tracking-tight transition-colors relative ${
                       isActive
                         ? 'bg-neutral-100 text-black font-bold'
                         : 'text-neutral-600 hover:text-black hover:bg-neutral-50'
@@ -157,6 +168,11 @@ export function TopNav() {
                   >
                     <Icon className="w-3.5 h-3.5" />
                     {item.label}
+                    {badge > 0 && (
+                      <span className="h-4 min-w-[16px] px-1 rounded-full bg-neutral-900 text-white text-[10px] font-bold flex items-center justify-center">
+                        {badge}
+                      </span>
+                    )}
                   </Link>
                 );
               })}
@@ -164,7 +180,12 @@ export function TopNav() {
           </div>
 
           {/* Right Header Actions */}
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-3">
+            {/* Live Presence Status Selector */}
+            <div className="hidden sm:block">
+              <PresenceSelector presence={presence} onStatusChange={setUserStatus} />
+            </div>
+
             {/* Live Task Timer Bar (Works seamlessly across all views) */}
             {activeTimer && activeTimer.taskId && (
               <div className="hidden sm:flex items-center gap-2 px-3 py-1 rounded-full bg-neutral-900 text-white text-xs border border-neutral-800 shadow-sm animate-in fade-in">
@@ -205,8 +226,7 @@ export function TopNav() {
             )}
 
             {/* Attendance Quick Badge for Employee / Limited Admin */}
-            {/* Attendance Quick Badge for Employee / Limited Admin */}
-            {!superAdmin && !isInSuperAdminView && (
+            {!superAdmin && !isInSuperAdminView && isAttendanceResolved && (
               <>
                 {todayAttendance && todayAttendance.checkInAt ? (
                   <Badge variant="success" className="hidden sm:inline-flex gap-1 text-[11px] font-semibold">
@@ -370,25 +390,42 @@ export function TopNav() {
 
         {/* Mobile Navigation Drawer */}
         {mobileMenuOpen && (
-          <div className="lg:hidden border-t border-neutral-200 bg-white px-4 py-3 space-y-1 animate-in slide-in-from-top-2">
-            {navItems.map((item) => {
-              const Icon = item.icon;
-              const isActive = pathname === item.href || (item.href !== '/dashboard' && item.href !== '/admin/dashboard' && item.href !== '/admin-view' && pathname.startsWith(item.href));
-              return (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  onClick={() => setMobileMenuOpen(false)}
-                  className={`flex items-center gap-3 px-3 py-2.5 rounded-md text-xs font-semibold ${
-                    isActive ? 'bg-black text-white' : 'text-neutral-700 hover:bg-neutral-100'
-                  }`}
-                >
-                  <Icon className="w-4 h-4" />
-                  {item.label}
-                </Link>
-              );
-            })}
-            {!superAdmin && !isInSuperAdminView && !todayAttendance?.checkInAt && (
+          <div className="lg:hidden border-t border-neutral-200 bg-white px-4 py-3 space-y-2 animate-in slide-in-from-top-2">
+            <div className="pb-2 border-b border-neutral-100 flex items-center justify-between">
+              <span className="text-xs font-semibold text-neutral-500">Your Presence</span>
+              <PresenceSelector presence={presence} onStatusChange={setUserStatus} />
+            </div>
+
+            <div className="space-y-1">
+              {navItems.map((item) => {
+                const Icon = item.icon;
+                const isActive = pathname === item.href || (item.href !== '/dashboard' && item.href !== '/admin/dashboard' && item.href !== '/admin-view' && pathname.startsWith(item.href));
+                const badge = (item as any).badge || 0;
+                return (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    onClick={() => setMobileMenuOpen(false)}
+                    className={`flex items-center justify-between px-3 py-2.5 rounded-md text-xs font-semibold ${
+                      isActive ? 'bg-black text-white' : 'text-neutral-700 hover:bg-neutral-100'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <Icon className="w-4 h-4" />
+                      {item.label}
+                    </div>
+                    {badge > 0 && (
+                      <span className={`h-4 min-w-[16px] px-1 rounded-full text-[10px] font-bold flex items-center justify-center ${
+                        isActive ? 'bg-white text-black' : 'bg-neutral-900 text-white'
+                      }`}>
+                        {badge}
+                      </span>
+                    )}
+                  </Link>
+                );
+              })}
+            </div>
+            {!superAdmin && !isInSuperAdminView && isAttendanceResolved && !todayAttendance?.checkInAt && (
               <div className="pt-2">
                 <Button
                   onClick={() => {

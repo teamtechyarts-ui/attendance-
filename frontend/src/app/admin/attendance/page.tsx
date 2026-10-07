@@ -36,6 +36,7 @@ const STATUS_FILTER_OPTIONS = [
   { value: 'PRESENT', label: 'Present' },
   { value: 'LATE', label: 'Late' },
   { value: 'HALF_DAY', label: 'Half Day' },
+  { value: 'WORKED_ON_HOLIDAY', label: 'Holiday Worked' },
   { value: 'ABSENT', label: 'Absent' },
   { value: 'LEAVE', label: 'Leave' },
   { value: 'HOLIDAY', label: 'Holiday' },
@@ -172,6 +173,7 @@ export default function AdminAttendancePage() {
     if (st === 'PRESENT') return <Badge variant="success">● PRESENT</Badge>;
     if (st === 'LATE') return <Badge variant="warning">● LATE</Badge>;
     if (st === 'HALF_DAY') return <Badge className="bg-blue-100 text-blue-800 border-blue-200">● HALF DAY</Badge>;
+    if (st === 'WORKED_ON_HOLIDAY') return <Badge className="bg-emerald-600 text-white border-emerald-700 shadow-sm font-semibold">★ HOLIDAY WORKED (+EL)</Badge>;
     if (st === 'ABSENT') return <Badge variant="danger">● ABSENT</Badge>;
     if (st === 'LEAVE' || st === 'ON_LEAVE') return <Badge className="bg-purple-100 text-purple-800 border-purple-200">● LEAVE</Badge>;
     if (st === 'HOLIDAY') return <Badge className="bg-emerald-100 text-emerald-800 border-emerald-200">● HOLIDAY</Badge>;

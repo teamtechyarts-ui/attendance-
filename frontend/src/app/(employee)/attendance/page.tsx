@@ -47,6 +47,7 @@ const STATUS_FILTER_OPTIONS = [
   { value: 'PRESENT', label: 'Present' },
   { value: 'LATE', label: 'Late' },
   { value: 'HALF_DAY', label: 'Half Day' },
+  { value: 'WORKED_ON_HOLIDAY', label: 'Holiday Worked' },
   { value: 'ABSENT', label: 'Absent' },
   { value: 'LEAVE', label: 'Leave' },
   { value: 'HOLIDAY', label: 'Holiday' },
@@ -54,8 +55,8 @@ const STATUS_FILTER_OPTIONS = [
 ];
 
 export default function AttendancePage() {
-  const { user, todayAttendance, markAttendanceSuccess } = useAuth();
-  const { refreshTimer } = useTaskTimer();
+  const { user, todayAttendance, isAttendanceLoading, isAttendanceResolved, markAttendanceSuccess } = useAuth();
+  const { activeTimer, refreshTimer } = useTaskTimer();
 
   const today = useMemo(() => new Date(), []);
   const [selectedMonth, setSelectedMonth] = useState(today.getMonth() + 1);
@@ -65,6 +66,9 @@ export default function AttendancePage() {
   const [history, setHistory] = useState<AttendanceRecord[]>([]);
   const [summary, setSummary] = useState<AttendanceSummary | null>(null);
   const [isCheckInOpen, setIsCheckInOpen] = useState(false);
+  const [isTimerCheckoutModalOpen, setIsTimerCheckoutModalOpen] = useState(false);
+  const [isOvertimeConfirmed, setIsOvertimeConfirmed] = useState(false);
+  const [isOvertimeSubmitting, setIsOvertimeSubmitting] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -113,15 +117,35 @@ export default function AttendancePage() {
     fetchAttendance();
   }, [fetchAttendance]);
 
-
-  const handleCheckOut = async () => {
+  const executeCheckOut = async () => {
     try {
       const res = await attendanceApi.checkOut({});
       markAttendanceSuccess(res);
       await refreshTimer();
+      setIsTimerCheckoutModalOpen(false);
       fetchAttendance();
     } catch (err: any) {
       alert(err.message || 'Failed to check out');
+    }
+  };
+
+  const handleCheckOutClick = () => {
+    if (activeTimer?.isActive && activeTimer?.taskId) {
+      setIsTimerCheckoutModalOpen(true);
+    } else {
+      executeCheckOut();
+    }
+  };
+
+  const handleConfirmOvertime = async () => {
+    setIsOvertimeSubmitting(true);
+    try {
+      await attendanceApi.confirmOvertime();
+      setIsOvertimeConfirmed(true);
+    } catch (err: any) {
+      alert(err.message || 'Failed to confirm overtime');
+    } finally {
+      setIsOvertimeSubmitting(false);
     }
   };
 
@@ -147,6 +171,9 @@ export default function AttendancePage() {
     if (st === 'HALF_DAY') {
       return <Badge className="bg-blue-100 text-blue-800 border-blue-200">● HALF DAY</Badge>;
     }
+    if (st === 'WORKED_ON_HOLIDAY') {
+      return <Badge className="bg-emerald-600 text-white border-emerald-700 shadow-sm font-semibold">★ HOLIDAY WORKED (+EL)</Badge>;
+    }
     if (st === 'ABSENT') {
       return <Badge variant="danger">● ABSENT</Badge>;
     }
@@ -165,8 +192,49 @@ export default function AttendancePage() {
     return <Badge variant="secondary">{st}</Badge>;
   };
 
+  // Check if currently working 8+ hours today
+  const isWorkingLongHours = useMemo(() => {
+    if (!todayAttendance?.checkInAt || todayAttendance.checkOutAt) return false;
+    const checkInTime = new Date(todayAttendance.checkInAt).getTime();
+    const elapsedMinutes = (Date.now() - checkInTime) / (1000 * 60);
+    return elapsedMinutes >= 480;
+  }, [todayAttendance]);
+
   return (
     <div className="space-y-6">
+      {/* Overtime Prompt Banner if working >= 8h */}
+      {isWorkingLongHours && !isOvertimeConfirmed && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-3.5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-sm">
+          <div className="flex items-center gap-2.5">
+            <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />
+            <div>
+              <p className="text-xs font-bold text-amber-900">Overtime Verification Required</p>
+              <p className="text-xs text-amber-700">
+                You have reached 8+ hours of work today. Are you intentionally working overtime or did you forget to check out?
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <Button
+              size="sm"
+              onClick={handleConfirmOvertime}
+              disabled={isOvertimeSubmitting}
+              className="bg-amber-600 hover:bg-amber-700 text-white text-xs h-8"
+            >
+              Continue as Overtime
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={handleCheckOutClick}
+              className="text-xs h-8 border-amber-300 text-amber-900 hover:bg-amber-100"
+            >
+              Check Out Now
+            </Button>
+          </div>
+        </div>
+      )}
+
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-neutral-200">
         <div>
@@ -176,19 +244,49 @@ export default function AttendancePage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {!todayAttendance?.checkInAt ? (
+          {!isAttendanceResolved || isAttendanceLoading ? (
+            <div className="h-8 w-32 rounded-md bg-neutral-200/80 animate-pulse" />
+          ) : !todayAttendance?.checkInAt ? (
             <Button onClick={() => setIsCheckInOpen(true)} className="gap-1.5 shadow-sm text-xs">
               <Clock className="w-3.5 h-3.5" /> Check In Today
             </Button>
           ) : (
             !todayAttendance.checkOutAt && (
-              <Button onClick={handleCheckOut} variant="outline" className="gap-1.5 text-xs">
+              <Button onClick={handleCheckOutClick} variant="outline" className="gap-1.5 text-xs">
                 <LogOut className="w-3.5 h-3.5" /> Check Out
               </Button>
             )
           )}
         </div>
       </div>
+
+      {/* Timer Checkout Modal Confirmation */}
+      {isTimerCheckoutModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full bg-amber-100 flex items-center justify-center text-amber-600 shrink-0">
+                <Clock className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-neutral-900">Task Timer Still Running</h3>
+                <p className="text-xs text-neutral-500 mt-0.5">Active timer detected</p>
+              </div>
+            </div>
+            <p className="text-sm text-neutral-600">
+              A task timer is currently running. Checking out will automatically stop the active timer and save your worked time to the task history.
+            </p>
+            <div className="flex justify-end gap-2.5 pt-2">
+              <Button variant="outline" size="sm" onClick={() => setIsTimerCheckoutModalOpen(false)}>
+                Cancel
+              </Button>
+              <Button size="sm" onClick={executeCheckOut} className="bg-neutral-900 text-white">
+                Check Out & Stop Timer
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Monthly Summary Cards */}
       {summary && (

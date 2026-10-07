@@ -3,7 +3,7 @@ export type UserRole = 'SUPER_ADMIN' | 'ADMIN' | 'MANAGER' | 'EMPLOYEE';
 export type UserStatus = 'ACTIVE' | 'INACTIVE' | 'SUSPENDED' | 'PENDING';
 export type GenderType = 'MALE' | 'FEMALE' | 'OTHER' | 'PREFER_NOT_TO_SAY';
 export type EmploymentStatus = 'ACTIVE' | 'ON_NOTICE' | 'RESIGNED' | 'TERMINATED';
-export type AttendanceStatus = 'PRESENT' | 'ABSENT' | 'HALF_DAY' | 'LATE' | 'ON_LEAVE' | 'HOLIDAY' | 'WEEKEND' | 'LEAVE' | 'OFF' | 'UPCOMING';
+export type AttendanceStatus = 'PRESENT' | 'ABSENT' | 'HALF_DAY' | 'LATE' | 'ON_LEAVE' | 'HOLIDAY' | 'WEEKEND' | 'LEAVE' | 'OFF' | 'UPCOMING' | 'WORKED_ON_HOLIDAY';
 export type WorkMode = 'OFFICE' | 'WFH' | 'REMOTE';
 export type AttendanceVerification = 'MANUAL' | 'MOBILE' | 'FACE' | 'FACE_AND_LOCATION';
 export type TaskSource = 'ADMIN' | 'MANAGER' | 'SELF';
@@ -672,6 +672,17 @@ export type Permission =
   | 'SETTINGS_VIEW'
   | 'SETTINGS_MANAGE'
   | 'SETTINGS_EDIT'
+  // Collaboration & Chat
+  | 'CHAT_VIEW'
+  | 'CHAT_CREATE_DIRECT'
+  | 'CHAT_CREATE_GROUP'
+  | 'CHAT_MANAGE_GROUP'
+  | 'CHAT_SEND_MESSAGE'
+  | 'CHAT_DELETE_MESSAGE'
+  | 'CHAT_MANAGE_REACTIONS'
+  | 'CHAT_START_MEETING'
+  | 'CHAT_SHARE_SCREEN'
+  | 'CHAT_MANAGE_MEETING'
   // Security & RBAC
   | 'ROLE_VIEW'
   | 'ROLE_ASSIGN'
@@ -721,3 +732,234 @@ export interface LimitedAdminAssignment {
   isLimitedAdmin: boolean;
   config: LimitedAdminConfig | null;
 }
+
+// ==========================================
+// COLLABORATION & CHAT (PHASE 1)
+// ==========================================
+
+export type ConversationType = 'DIRECT' | 'GROUP';
+export type ConversationMemberRole = 'ADMIN' | 'MEMBER';
+export type UserPresenceStatus = 'AVAILABLE' | 'BUSY' | 'DO_NOT_DISTURB' | 'AWAY' | 'OFFLINE';
+
+export interface UserPresence {
+  id: string;
+  userId: string;
+  status: UserPresenceStatus;
+  customStatusMessage?: string | null;
+  lastSeenAt: string;
+  updatedAt: string;
+}
+
+export interface ConversationMember {
+  id: string;
+  conversationId: string;
+  userId: string;
+  role: ConversationMemberRole;
+  displayName?: string | null;
+  joinedAt: string;
+  leftAt?: string | null;
+  lastReadMessageId?: string | null;
+  lastReadAt?: string | null;
+  mutedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  user?: {
+    id: string;
+    email: string;
+    role: UserRole;
+    displayName?: string | null;
+    firstName?: string | null;
+    lastName?: string | null;
+    profilePhotoUrl?: string | null;
+    employee?: {
+      id: string;
+      employeeCode?: string;
+      designation?: { name: string } | null;
+      department?: { name: string } | null;
+    } | null;
+    presence?: UserPresence | null;
+  };
+}
+
+export interface MessageReaction {
+  id: string;
+  messageId: string;
+  userId: string;
+  reaction: string;
+  createdAt: string;
+  user?: {
+    id: string;
+    displayName?: string | null;
+  };
+}
+
+export interface MessageAttachment {
+  id: string;
+  messageId: string;
+  fileName: string;
+  fileUrl: string;
+  fileSize: number;
+  fileType: string;
+  createdAt: string;
+}
+
+export interface Message {
+  id: string;
+  conversationId: string;
+  senderUserId: string;
+  body: string;
+  replyToMessageId?: string | null;
+  isSystem?: boolean;
+  status?: 'SENDING' | 'SENT' | 'FAILED';
+  temporaryId?: string;
+  createdAt: string;
+  editedAt?: string | null;
+  deletedAt?: string | null;
+  sender?: {
+    id: string;
+    email: string;
+    displayName?: string | null;
+    firstName?: string | null;
+    lastName?: string | null;
+    profilePhotoUrl?: string | null;
+    employee?: {
+      id: string;
+      employeeCode?: string;
+      designation?: { name: string } | null;
+      department?: { name: string } | null;
+    } | null;
+  };
+  replyTo?: {
+    id: string;
+    senderUserId: string;
+    body: string;
+    deletedAt?: string | null;
+    sender?: {
+      id: string;
+      displayName?: string | null;
+    };
+  } | null;
+  reactions?: MessageReaction[];
+  attachments?: MessageAttachment[];
+}
+
+export interface Conversation {
+  id: string;
+  type: ConversationType;
+  title?: string | null;
+  description?: string | null;
+  createdBy?: string | null;
+  createdByName?: string | null;
+  creator?: {
+    id: string;
+    email: string;
+    displayName?: string | null;
+  } | null;
+  directUserAId?: string | null;
+  directUserBId?: string | null;
+  directKey?: string | null;
+  isArchived: boolean;
+  lastMessageAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  members?: ConversationMember[];
+  lastMessage?: Message | null;
+  unreadCount?: number;
+  otherUser?: {
+    id: string;
+    email: string;
+    displayName?: string | null;
+    firstName?: string | null;
+    lastName?: string | null;
+    profilePhotoUrl?: string | null;
+    employee?: {
+      id: string;
+      employeeCode?: string;
+      designation?: { name: string } | null;
+      department?: { name: string } | null;
+    } | null;
+    presence?: UserPresence | null;
+  } | null;
+}
+
+export interface PeopleDirectoryItem {
+  userId: string;
+  employeeId: string;
+  employeeCode: string;
+  displayName: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  profilePhotoUrl?: string | null;
+  departmentId?: string | null;
+  departmentName?: string | null;
+  designationId?: string | null;
+  designationName?: string | null;
+  workMode?: string | null;
+  employmentStatus?: string | null;
+  presence: {
+    status: UserPresenceStatus;
+    customStatusMessage?: string | null;
+    lastSeenAt: string;
+    isOnline: boolean;
+  };
+}
+
+export type MeetingStatus = 'SCHEDULED' | 'LOBBY' | 'ACTIVE' | 'ENDING' | 'ENDED' | 'CANCELLED';
+
+export type MeetingParticipantStatus = 'INVITED' | 'JOINING' | 'JOINED' | 'LEFT' | 'DISCONNECTED' | 'REMOVED';
+
+export type ScreenShareState =
+  | 'NOT_SHARING'
+  | 'STARTING'
+  | 'SHARING'
+  | 'STOPPING'
+  | 'FAILED';
+
+export interface ScreenShareInfo {
+  userId: string;
+  displayName: string;
+  startedAt: string;
+}
+
+export interface MeetingParticipantInfo {
+  userId: string;
+  displayName: string;
+  avatarUrl: string | null;
+  role: 'HOST' | 'PARTICIPANT';
+  status: MeetingParticipantStatus;
+  isMuted: boolean;
+  isCameraOff: boolean;
+  isScreenSharing?: boolean;
+  joinedAt: string;
+  leftAt?: string | null;
+  lastSeenAt: string;
+}
+
+export interface PublicMeetingState {
+  meetingId: string;
+  conversationId: string;
+  title: string;
+  hostUserId: string;
+  hostName: string;
+  hostAvatarUrl: string | null;
+  status: MeetingStatus;
+  startedAt: string;
+  endedAt?: string | null;
+  activeScreenShare?: ScreenShareInfo | null;
+  participants: MeetingParticipantInfo[];
+}
+
+export type MeetingState =
+  | 'IDLE'
+  | 'LOBBY'
+  | 'STARTING'
+  | 'JOINING'
+  | 'ACTIVE'
+  | 'RECONNECTING'
+  | 'ENDING'
+  | 'ENDED'
+  | 'FAILED';
+
+
+

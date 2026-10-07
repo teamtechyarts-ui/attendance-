@@ -98,3 +98,70 @@ export interface WelcomeEmployeeTemplateData {
   designationName?: string;
 }
 
+export interface CheckInReminderTemplateData {
+  employeeName: string;
+  scheduledTime: string;
+  date: string;
+  quote: string;
+  quoteAuthor?: string;
+  attendanceUrl?: string;
+}
+
+export interface CheckOutReminderTemplateData {
+  employeeName: string;
+  scheduledCheckoutTime: string;
+  date: string;
+  attendanceUrl?: string;
+}
+
+export interface EightHourCheckoutReminderTemplateData {
+  employeeName: string;
+  workedDuration: string;
+  date: string;
+  overtimeUrl?: string;
+  attendanceUrl?: string;
+}
+
+export interface ThirtyMinuteCheckoutReminderTemplateData {
+  employeeName: string;
+  workedDuration: string;
+  overtimeUrl?: string;
+  attendanceUrl?: string;
+}
+
+export interface TomorrowHolidayTemplateData {
+  employeeName: string;
+  holidayName: string;
+  holidayDate: string;
+  description?: string;
+}
+
+export interface TaskDeadlineTemplateData {
+  employeeName: string;
+  taskTitle: string;
+  projectName?: string;
+  dueDate: string;
+  priority?: string;
+  timeRemaining?: string;
+  taskUrl?: string;
+}
+
+export interface ScheduledTaskTemplateData {
+  employeeName: string;
+  taskTitle: string;
+  projectName?: string;
+  scheduledTime: string;
+  priority?: string;
+  taskUrl?: string;
+}
+
+export interface LongRunningTimerTemplateData {
+  employeeName: string;
+  taskTitle: string;
+  projectName?: string;
+  startedAt: string;
+  elapsedMinutes: number | string;
+  taskUrl?: string;
+}
+
+

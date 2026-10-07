@@ -102,6 +102,7 @@ export const attendanceApi = {
   getToday: () => api.get<{ record: AttendanceRecord | null; workday: any; date: string }>('/api/attendance/today'),
   checkIn: (data: CheckInInput) => api.post<AttendanceRecord>('/api/attendance/check-in', data),
   checkOut: (data: CheckOutInput) => api.post<AttendanceRecord>('/api/attendance/check-out', data),
+  confirmOvertime: () => api.post<{ success: boolean; overtimeConfirmed: boolean; date: string }>('/api/attendance/confirm-overtime'),
   getHistory: async (params?: { year?: number; month?: number; employeeId?: string; date?: string; status?: string; adminView?: boolean }) => {
     const cleanParams: Record<string, string> = {};
     if (params) {
@@ -383,5 +384,59 @@ export const rbacApi = {
   revokeAssignment: (employeeId: string) =>
     api.delete<{ message: string }>(`/api/rbac/assignments/${employeeId}`),
 };
+
+export const collaborationApi = {
+  getPeopleDirectory: (params?: { search?: string; departmentId?: string }) => {
+    const query = new URLSearchParams();
+    if (params?.search) query.append('search', params.search);
+    if (params?.departmentId) query.append('departmentId', params.departmentId);
+    const qs = query.toString();
+    return api.get<{ people: import('@/types').PeopleDirectoryItem[] }>(`/api/collaboration/people${qs ? `?${qs}` : ''}`);
+  },
+  getPresence: () => api.get<{ presence: import('@/types').UserPresence }>('/api/collaboration/presence'),
+  setPresenceStatus: (data: { status: import('@/types').UserPresenceStatus; customStatusMessage?: string | null }) =>
+    api.post<{ presence: import('@/types').UserPresence }>('/api/collaboration/presence/status', data),
+  getConversations: () =>
+    api.get<{ conversations: import('@/types').Conversation[] }>('/api/collaboration/conversations'),
+  getOrCreateDirectConversation: (targetUserId: string) =>
+    api.post<{ conversation: import('@/types').Conversation }>('/api/collaboration/conversations/direct', { targetUserId }),
+  createGroupConversation: (data: { title: string; description?: string | null; memberUserIds: string[] }) =>
+    api.post<{ conversation: import('@/types').Conversation }>('/api/collaboration/conversations/group', data),
+  getConversationById: (id: string) =>
+    api.get<{ conversation: import('@/types').Conversation }>(`/api/collaboration/conversations/${id}`),
+  getConversationMessages: (id: string, params?: { cursor?: string; limit?: number }) => {
+    const query = new URLSearchParams();
+    if (params?.cursor) query.append('cursor', params.cursor);
+    if (params?.limit) query.append('limit', params.limit.toString());
+    const qs = query.toString();
+    return api.get<{ messages: import('@/types').Message[]; nextCursor: string | null }>(
+      `/api/collaboration/conversations/${id}/messages${qs ? `?${qs}` : ''}`
+    );
+  },
+  sendMessage: (conversationId: string, data: { body: string; replyToMessageId?: string | null }) =>
+    api.post<{ message: import('@/types').Message }>(`/api/collaboration/conversations/${conversationId}/messages`, data),
+  editMessage: (messageId: string, data: { body: string }) =>
+    api.patch<{ message: import('@/types').Message }>(`/api/collaboration/messages/${messageId}`, data),
+  deleteMessage: (messageId: string) =>
+    api.delete<{ success: boolean; messageId: string }>(`/api/collaboration/messages/${messageId}`),
+  toggleReaction: (messageId: string, reaction: string) =>
+    api.post<{ success: boolean; reactions: import('@/types').MessageReaction[] }>(
+      `/api/collaboration/messages/${messageId}/reactions`,
+      { reaction }
+    ),
+  markConversationAsRead: (conversationId: string) =>
+    api.post<{ success: boolean; conversationId: string }>(`/api/collaboration/conversations/${conversationId}/read`, {}),
+  addGroupMember: (conversationId: string, targetUserId: string) =>
+    api.post<{ success: boolean }>(`/api/collaboration/conversations/${conversationId}/members`, { targetUserId }),
+  removeGroupMember: (conversationId: string, targetUserId: string) =>
+    api.delete<{ success: boolean }>(`/api/collaboration/conversations/${conversationId}/members/${targetUserId}`),
+  leaveGroupConversation: (conversationId: string) =>
+    api.post<{ success: boolean }>(`/api/collaboration/conversations/${conversationId}/leave`, {}),
+  getActiveMeeting: (conversationId: string) =>
+    api.get<{ meeting: import('@/types').PublicMeetingState | null }>(`/api/collaboration/conversations/${conversationId}/meeting`),
+  getMeetingById: (meetingId: string) =>
+    api.get<{ meeting: import('@/types').PublicMeetingState }>(`/api/collaboration/meetings/${meetingId}`),
+};
+
 
 
