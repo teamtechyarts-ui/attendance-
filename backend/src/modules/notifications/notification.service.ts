@@ -436,14 +436,40 @@ export class NotificationService {
    * Delete a notification (strictly owned by authenticated user)
    */
   public static async deleteNotification(id: string, userId: string): Promise<boolean> {
+    if (!id || !userId) return false;
+
     return DbService.query(
       async () => {
-        const result = await prisma.notification.deleteMany({
-          where: { id, userId },
+        return await prisma.$transaction(async (tx) => {
+          const exists = await tx.notification.findFirst({
+            where: { id, userId },
+            select: { id: true },
+          });
+
+          if (!exists) return false;
+
+          await tx.notificationDelivery.deleteMany({
+            where: { notificationId: id },
+          }).catch(() => {});
+
+          const result = await tx.notification.deleteMany({
+            where: { id, userId },
+          });
+          return result.count > 0;
         });
-        return result.count > 0;
       },
       async () => {
+        const found = await DbService.restRequest<any[]>(
+          `/notifications?id=eq.${id}&user_id=eq.${userId}&select=id`
+        );
+        if (!found || found.length === 0) {
+          return false;
+        }
+
+        await DbService.restRequest(`/notification_deliveries?notification_id=eq.${id}`, {
+          method: 'DELETE',
+        }).catch(() => {});
+
         await DbService.restRequest(`/notifications?id=eq.${id}&user_id=eq.${userId}`, {
           method: 'DELETE',
         });
@@ -451,4 +477,133 @@ export class NotificationService {
       }
     );
   }
+
+  /**
+   * Bulk delete notifications (strictly owned by authenticated user)
+   */
+  public static async bulkDeleteNotifications(
+    ids: string[],
+    userId: string
+  ): Promise<{ deletedCount: number; deletedIds: string[] }> {
+    if (!ids || ids.length === 0 || !userId) {
+      return { deletedCount: 0, deletedIds: [] };
+    }
+
+    const uniqueIds = Array.from(new Set(ids.filter(Boolean)));
+
+    return DbService.query(
+      async () => {
+        return await prisma.$transaction(async (tx) => {
+          const owned = await tx.notification.findMany({
+            where: {
+              id: { in: uniqueIds },
+              userId,
+            },
+            select: { id: true },
+          });
+
+          const authorizedIds = owned.map((n) => n.id);
+          if (authorizedIds.length === 0) {
+            return { deletedCount: 0, deletedIds: [] };
+          }
+
+          await tx.notificationDelivery.deleteMany({
+            where: { notificationId: { in: authorizedIds } },
+          }).catch(() => {});
+
+          const deleteResult = await tx.notification.deleteMany({
+            where: {
+              id: { in: authorizedIds },
+              userId,
+            },
+          });
+
+          return {
+            deletedCount: deleteResult.count,
+            deletedIds: authorizedIds,
+          };
+        });
+      },
+      async () => {
+        const found = await DbService.restRequest<any[]>(
+          `/notifications?id=in.(${uniqueIds.join(',')})&user_id=eq.${userId}&select=id`
+        );
+        const authorizedIds = (found || []).map((n) => n.id || n.id).filter(Boolean);
+        if (authorizedIds.length === 0) {
+          return { deletedCount: 0, deletedIds: [] };
+        }
+
+        for (const id of authorizedIds) {
+          await DbService.restRequest(`/notification_deliveries?notification_id=eq.${id}`, {
+            method: 'DELETE',
+          }).catch(() => {});
+        }
+        await DbService.restRequest(
+          `/notifications?id=in.(${authorizedIds.join(',')})&user_id=eq.${userId}`,
+          { method: 'DELETE' }
+        );
+        return {
+          deletedCount: authorizedIds.length,
+          deletedIds: authorizedIds,
+        };
+      }
+    );
+  }
+
+  /**
+   * Delete ALL notifications for the authenticated user across all pages in one atomic operation
+   */
+  public static async deleteAllNotifications(userId: string): Promise<{ deletedCount: number }> {
+    if (!userId) {
+      return { deletedCount: 0 };
+    }
+
+    return DbService.query(
+      async () => {
+        return await prisma.$transaction(async (tx) => {
+          const userNotifications = await tx.notification.findMany({
+            where: { userId },
+            select: { id: true },
+          });
+
+          const notificationIds = userNotifications.map((n) => n.id);
+          if (notificationIds.length === 0) {
+            return { deletedCount: 0 };
+          }
+
+          await tx.notificationDelivery.deleteMany({
+            where: { notificationId: { in: notificationIds } },
+          }).catch(() => {});
+
+          const deleteResult = await tx.notification.deleteMany({
+            where: { userId },
+          });
+
+          return { deletedCount: deleteResult.count };
+        });
+      },
+      async () => {
+        const found = await DbService.restRequest<any[]>(
+          `/notifications?user_id=eq.${userId}&select=id`
+        );
+        const notificationIds = (found || []).map((n) => n.id).filter(Boolean);
+        if (notificationIds.length === 0) {
+          return { deletedCount: 0 };
+        }
+
+        for (const id of notificationIds) {
+          await DbService.restRequest(`/notification_deliveries?notification_id=eq.${id}`, {
+            method: 'DELETE',
+          }).catch(() => {});
+        }
+
+        await DbService.restRequest(`/notifications?user_id=eq.${userId}`, {
+          method: 'DELETE',
+        });
+
+        return { deletedCount: notificationIds.length };
+      }
+    );
+  }
 }
+

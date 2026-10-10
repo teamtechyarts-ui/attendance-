@@ -13,6 +13,7 @@ import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@
 import { LoadingState } from '@/components/ui/loading-state';
 import { EmptyState } from '@/components/ui/empty-state';
 import { CheckInModal } from '@/components/attendance/check-in-modal';
+import { CheckoutModal } from '@/components/attendance/checkout-modal';
 import { formatDate, formatTime } from '@/lib/utils';
 import {
   Clock,
@@ -66,7 +67,7 @@ export default function AttendancePage() {
   const [history, setHistory] = useState<AttendanceRecord[]>([]);
   const [summary, setSummary] = useState<AttendanceSummary | null>(null);
   const [isCheckInOpen, setIsCheckInOpen] = useState(false);
-  const [isTimerCheckoutModalOpen, setIsTimerCheckoutModalOpen] = useState(false);
+  const [isCheckoutModalOpen, setIsCheckoutModalOpen] = useState(false);
   const [isOvertimeConfirmed, setIsOvertimeConfirmed] = useState(false);
   const [isOvertimeSubmitting, setIsOvertimeSubmitting] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -117,24 +118,15 @@ export default function AttendancePage() {
     fetchAttendance();
   }, [fetchAttendance]);
 
-  const executeCheckOut = async () => {
-    try {
-      const res = await attendanceApi.checkOut({});
-      markAttendanceSuccess(res);
-      await refreshTimer();
-      setIsTimerCheckoutModalOpen(false);
-      fetchAttendance();
-    } catch (err: any) {
-      alert(err.message || 'Failed to check out');
-    }
+  const handleCheckOutSuccess = async (res: any) => {
+    markAttendanceSuccess(res);
+    await refreshTimer();
+    setIsCheckoutModalOpen(false);
+    fetchAttendance();
   };
 
   const handleCheckOutClick = () => {
-    if (activeTimer?.isActive && activeTimer?.taskId) {
-      setIsTimerCheckoutModalOpen(true);
-    } else {
-      executeCheckOut();
-    }
+    setIsCheckoutModalOpen(true);
   };
 
   const handleConfirmOvertime = async () => {
@@ -260,33 +252,6 @@ export default function AttendancePage() {
         </div>
       </div>
 
-      {/* Timer Checkout Modal Confirmation */}
-      {isTimerCheckoutModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6 space-y-4">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full bg-amber-100 flex items-center justify-center text-amber-600 shrink-0">
-                <Clock className="w-5 h-5" />
-              </div>
-              <div>
-                <h3 className="text-base font-bold text-neutral-900">Task Timer Still Running</h3>
-                <p className="text-xs text-neutral-500 mt-0.5">Active timer detected</p>
-              </div>
-            </div>
-            <p className="text-sm text-neutral-600">
-              A task timer is currently running. Checking out will automatically stop the active timer and save your worked time to the task history.
-            </p>
-            <div className="flex justify-end gap-2.5 pt-2">
-              <Button variant="outline" size="sm" onClick={() => setIsTimerCheckoutModalOpen(false)}>
-                Cancel
-              </Button>
-              <Button size="sm" onClick={executeCheckOut} className="bg-neutral-900 text-white">
-                Check Out & Stop Timer
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Monthly Summary Cards */}
       {summary && (
@@ -508,6 +473,14 @@ export default function AttendancePage() {
         onSuccess={() => {
           fetchAttendance();
         }}
+      />
+
+      <CheckoutModal
+        isOpen={isCheckoutModalOpen}
+        onClose={() => setIsCheckoutModalOpen(false)}
+        onSuccess={handleCheckOutSuccess}
+        activeTimerRunning={Boolean(activeTimer && activeTimer.isActive)}
+        activeTaskTitle={activeTimer?.taskId ? 'active task' : null}
       />
     </div>
   );

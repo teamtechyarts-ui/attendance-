@@ -4,12 +4,10 @@ import React, { useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useAuth } from '@/hooks/use-auth';
-import { useTaskTimer } from '@/hooks/use-task-timer';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { CheckInModal } from '@/components/attendance/check-in-modal';
 import { NotificationPopover } from '@/components/notifications/notification-popover';
-import { formatSecondsToTime } from '@/lib/utils';
 import { isSuperAdmin, isLimitedAdmin, getPermittedAdminModules } from '@/lib/permissions';
 import { useCollaboration } from '@/hooks/use-collaboration';
 import { PresenceSelector } from '@/components/collaboration/presence-selector';
@@ -23,9 +21,6 @@ import {
   LogOut,
   Menu,
   MessageSquare,
-  Pause,
-  Play,
-  Square,
   User,
   Users,
   X,
@@ -60,7 +55,6 @@ export function TopNav() {
   const pathname = usePathname();
   const router = useRouter();
   const { user, accessMode, todayAttendance, isAttendanceLoading, isAttendanceResolved, logout } = useAuth();
-  const { activeTimer, elapsedSeconds, startTimer, pauseTimer, stopTimer } = useTaskTimer();
   const { presence, setUserStatus, totalUnreadCount } = useCollaboration();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isCheckInOpen, setIsCheckInOpen] = useState(false);
@@ -186,45 +180,6 @@ export function TopNav() {
               <PresenceSelector presence={presence} onStatusChange={setUserStatus} />
             </div>
 
-            {/* Live Task Timer Bar (Works seamlessly across all views) */}
-            {activeTimer && activeTimer.taskId && (
-              <div className="hidden sm:flex items-center gap-2 px-3 py-1 rounded-full bg-neutral-900 text-white text-xs border border-neutral-800 shadow-sm animate-in fade-in">
-                {activeTimer.isActive ? (
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-                ) : (
-                  <span className="w-2 h-2 rounded-full bg-amber-400" />
-                )}
-                <span className="font-mono font-bold tracking-wider">{formatSecondsToTime(elapsedSeconds)}</span>
-                <span className="text-neutral-400 text-[11px] max-w-[120px] truncate">{activeTimer.task?.title || 'Task Timer'}</span>
-                <div className="flex items-center gap-1 ml-1 pl-1 border-l border-neutral-700">
-                  {activeTimer.isActive ? (
-                    <button
-                      onClick={() => pauseTimer(activeTimer.taskId)}
-                      aria-label="Pause Timer"
-                      className="p-1 hover:text-amber-400 transition-colors"
-                    >
-                      <Pause className="w-3 h-3" />
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => startTimer(activeTimer.taskId)}
-                      aria-label="Resume Timer"
-                      className="p-1 hover:text-emerald-400 transition-colors"
-                    >
-                      <Play className="w-3 h-3" />
-                    </button>
-                  )}
-                  <button
-                    onClick={() => stopTimer(activeTimer.taskId)}
-                    aria-label="Complete Task"
-                    className="p-1 hover:text-emerald-400 transition-colors"
-                  >
-                    <Square className="w-3 h-3" />
-                  </button>
-                </div>
-              </div>
-            )}
-
             {/* Attendance Quick Badge for Employee / Limited Admin */}
             {!superAdmin && !isInSuperAdminView && isAttendanceResolved && (
               <>
@@ -256,8 +211,14 @@ export function TopNav() {
                 className="flex items-center gap-2 p-1 rounded-md hover:bg-neutral-100 transition-colors"
                 aria-label="User menu"
               >
-                <div className="w-7 h-7 rounded-full bg-neutral-900 text-white flex items-center justify-center font-bold text-xs">
-                  {user?.displayName ? (
+                <div className="w-7 h-7 rounded-full bg-neutral-900 text-white flex items-center justify-center font-bold text-xs overflow-hidden shrink-0 border border-neutral-200">
+                  {user?.profilePhotoUrl ? (
+                    <img
+                      src={user.profilePhotoUrl}
+                      alt={user.displayName || 'User'}
+                      className="w-full h-full object-cover"
+                    />
+                  ) : user?.displayName ? (
                     user.displayName.charAt(0).toUpperCase()
                   ) : (
                     <User className="w-3.5 h-3.5 text-neutral-300" />
@@ -271,9 +232,26 @@ export function TopNav() {
               {isUserMenuOpen && (
                 <div className="absolute right-0 mt-2 w-64 rounded-md border border-neutral-200 bg-white p-1.5 shadow-lg z-50 text-xs animate-in fade-in zoom-in-95">
                   <div className="px-3 py-2 border-b border-neutral-100">
-                    <p className="font-bold text-neutral-900 truncate">{user?.displayName || 'User'}</p>
-                    <p className="text-neutral-500 text-[11px] truncate">{user?.email || ''}</p>
-                    <Badge variant="secondary" className="mt-1.5 text-[10px] font-bold">
+                    <div className="flex items-center gap-2.5 mb-1.5">
+                      <div className="w-8 h-8 rounded-full bg-neutral-900 text-white flex items-center justify-center font-bold text-xs overflow-hidden shrink-0 border border-neutral-200">
+                        {user?.profilePhotoUrl ? (
+                          <img
+                            src={user.profilePhotoUrl}
+                            alt={user.displayName || 'User'}
+                            className="w-full h-full object-cover"
+                          />
+                        ) : user?.displayName ? (
+                          user.displayName.charAt(0).toUpperCase()
+                        ) : (
+                          <User className="w-4 h-4 text-neutral-300" />
+                        )}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="font-bold text-neutral-900 truncate">{user?.displayName || 'User'}</p>
+                        <p className="text-neutral-500 text-[11px] truncate">{user?.email || ''}</p>
+                      </div>
+                    </div>
+                    <Badge variant="secondary" className="text-[10px] font-bold">
                       {superAdmin ? 'SUPER ADMIN' : limitedAdmin ? 'LIMITED ADMIN' : 'EMPLOYEE'}
                     </Badge>
                   </div>

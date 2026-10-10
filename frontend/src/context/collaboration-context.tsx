@@ -1720,9 +1720,10 @@ export function CollaborationProvider({ children }: { children: ReactNode }) {
       const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       let wsHost = process.env.NEXT_PUBLIC_WS_URL;
       if (!wsHost) {
-        if (process.env.NEXT_PUBLIC_API_URL) {
+        const rawApiUrl = process.env.NEXT_PUBLIC_API_URL || 'https://teamsapi.techyarts.com';
+        if (rawApiUrl) {
           try {
-            const apiUrlObj = new URL(process.env.NEXT_PUBLIC_API_URL);
+            const apiUrlObj = new URL(rawApiUrl);
             wsHost = apiUrlObj.host;
           } catch {
             wsHost = window.location.hostname + ':4000';

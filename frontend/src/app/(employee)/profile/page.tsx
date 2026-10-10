@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '@/hooks/use-auth';
 import { employeesApi, authApi } from '@/lib/api';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
@@ -8,10 +8,14 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { formatDate } from '@/lib/utils';
-import { User, Lock, Save, CheckCircle2, Shield } from 'lucide-react';
+import { compressProfileImage, CompressedImageResult } from '@/lib/image-compression';
+import { User, Lock, Save, CheckCircle2, Shield, Camera, Trash2, X, Upload, Loader2, AlertCircle } from 'lucide-react';
 
 export default function ProfilePage() {
   const { user, refreshMe } = useAuth();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Form states
   const [displayName, setDisplayName] = useState('');
   const [phone, setPhone] = useState('');
   const [city, setCity] = useState('');
@@ -19,6 +23,13 @@ export default function ProfilePage() {
   const [emergencyPhone, setEmergencyPhone] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
+
+  // Profile Photo state
+  const [compressedResult, setCompressedResult] = useState<CompressedImageResult | null>(null);
+  const [isCompressing, setIsCompressing] = useState(false);
+  const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
+  const [isRemovingPhoto, setIsRemovingPhoto] = useState(false);
+  const [photoFeedback, setPhotoFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
   // Password state
   const [currentPassword, setCurrentPassword] = useState('');
@@ -31,6 +42,83 @@ export default function ProfilePage() {
       setDisplayName(user.displayName || '');
     }
   }, [user]);
+
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setPhotoFeedback(null);
+    setIsCompressing(true);
+
+    try {
+      const result = await compressProfileImage(file);
+      setCompressedResult(result);
+    } catch (err: any) {
+      setPhotoFeedback({
+        type: 'error',
+        message: err?.message || 'Failed to process image',
+      });
+    } finally {
+      setIsCompressing(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
+
+  const handleSavePhoto = async () => {
+    if (!compressedResult) return;
+
+    setIsUploadingPhoto(true);
+    setPhotoFeedback(null);
+
+    try {
+      await employeesApi.uploadProfilePhoto({ image: compressedResult.dataUrl });
+      await refreshMe();
+      setCompressedResult(null);
+      setPhotoFeedback({
+        type: 'success',
+        message: 'Profile photo saved successfully!',
+      });
+      setTimeout(() => setPhotoFeedback(null), 4000);
+    } catch (err: any) {
+      setPhotoFeedback({
+        type: 'error',
+        message: err?.message || 'Failed to upload profile photo',
+      });
+    } finally {
+      setIsUploadingPhoto(false);
+    }
+  };
+
+  const handleCancelPreview = () => {
+    setCompressedResult(null);
+    setPhotoFeedback(null);
+  };
+
+  const handleRemovePhoto = async () => {
+    if (!confirm('Are you sure you want to remove your profile photo?')) return;
+
+    setIsRemovingPhoto(true);
+    setPhotoFeedback(null);
+
+    try {
+      await employeesApi.deleteProfilePhoto();
+      await refreshMe();
+      setPhotoFeedback({
+        type: 'success',
+        message: 'Profile photo removed successfully.',
+      });
+      setTimeout(() => setPhotoFeedback(null), 4000);
+    } catch (err: any) {
+      setPhotoFeedback({
+        type: 'error',
+        message: err?.message || 'Failed to remove profile photo',
+      });
+    } finally {
+      setIsRemovingPhoto(false);
+    }
+  };
 
   const handleProfileSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -80,12 +168,145 @@ export default function ProfilePage() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Left Card: Official Badge Details */}
+        {/* Left Card: Official Badge Details & Photo Upload */}
         <Card className="p-6 space-y-4">
-          <div className="text-center space-y-2">
-            <div className="w-20 h-20 rounded-full bg-neutral-900 text-white flex items-center justify-center font-bold text-2xl mx-auto shadow">
-              {user?.displayName ? user.displayName.charAt(0) : 'U'}
+          <div className="text-center space-y-3">
+            {/* Circular Avatar with Camera overlay and preview */}
+            <div className="relative w-24 h-24 mx-auto group">
+              <div className="w-24 h-24 rounded-full bg-neutral-900 text-white flex items-center justify-center font-bold text-3xl mx-auto shadow-md overflow-hidden border-2 border-neutral-200">
+                {compressedResult ? (
+                  <img
+                    src={compressedResult.dataUrl}
+                    alt="Preview"
+                    className="w-full h-full object-cover"
+                  />
+                ) : user?.profilePhotoUrl ? (
+                  <img
+                    src={user.profilePhotoUrl}
+                    alt={user.displayName || 'Profile'}
+                    className="w-full h-full object-cover"
+                  />
+                ) : user?.displayName ? (
+                  user.displayName.charAt(0).toUpperCase()
+                ) : (
+                  'U'
+                )}
+              </div>
+
+              {/* Upload trigger button overlay */}
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isCompressing || isUploadingPhoto || isRemovingPhoto}
+                className="absolute bottom-0 right-0 p-2 rounded-full bg-neutral-900 hover:bg-black text-white shadow-lg transition-transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-black border-2 border-white"
+                title="Upload profile photo"
+                aria-label="Upload profile photo"
+              >
+                {isCompressing ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Camera className="w-3.5 h-3.5" />
+                )}
+              </button>
+
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                onChange={handleFileSelect}
+                className="hidden"
+                aria-label="Select profile photo file"
+              />
             </div>
+
+            {/* Preview Controls (Save / Cancel) */}
+            {compressedResult && (
+              <div className="p-2.5 rounded-lg bg-neutral-50 border border-neutral-200 space-y-2 animate-in fade-in">
+                <p className="text-[11px] text-neutral-600 font-medium">
+                  Square WebP (512×512, ~{Math.round(compressedResult.sizeBytes / 1024)} KB)
+                </p>
+                <div className="flex items-center justify-center gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={handleCancelPreview}
+                    disabled={isUploadingPhoto}
+                    className="text-xs h-8 px-2.5"
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={handleSavePhoto}
+                    disabled={isUploadingPhoto}
+                    className="text-xs h-8 px-3 gap-1.5 bg-neutral-900 hover:bg-black text-white"
+                  >
+                    {isUploadingPhoto ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" /> Uploading...
+                      </>
+                    ) : (
+                      <>
+                        <Upload className="w-3.5 h-3.5" /> Save Photo
+                      </>
+                    )}
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {/* Remove photo button if user already has photo & not previewing */}
+            {!compressedResult && user?.profilePhotoUrl && (
+              <div className="pt-0.5">
+                <button
+                  type="button"
+                  onClick={handleRemovePhoto}
+                  disabled={isRemovingPhoto}
+                  className="inline-flex items-center gap-1 text-[11px] font-medium text-rose-600 hover:text-rose-700 transition-colors"
+                >
+                  {isRemovingPhoto ? (
+                    <>
+                      <Loader2 className="w-3 h-3 animate-spin" /> Removing...
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 className="w-3 h-3" /> Remove Photo
+                    </>
+                  )}
+                </button>
+              </div>
+            )}
+
+            {/* Photo Feedback Message */}
+            {photoFeedback && (
+              <div
+                className={`p-2 rounded text-xs flex items-center justify-between gap-1.5 ${
+                  photoFeedback.type === 'success'
+                    ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                    : 'bg-rose-50 text-rose-800 border border-rose-200'
+                }`}
+              >
+                <div className="flex items-center gap-1.5">
+                  {photoFeedback.type === 'success' ? (
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  ) : (
+                    <AlertCircle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                  )}
+                  <span className="text-[11px] font-medium">{photoFeedback.message}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setPhotoFeedback(null)}
+                  className="p-0.5 text-neutral-400 hover:text-neutral-700"
+                  aria-label="Dismiss feedback"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            )}
+
             <div>
               <h3 className="text-base font-bold text-neutral-900">{user?.displayName || 'My Profile'}</h3>
               <p className="text-xs text-neutral-500 font-mono">{user?.email}</p>

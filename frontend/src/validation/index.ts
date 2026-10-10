@@ -85,10 +85,38 @@ export const checkInSchema = z.object({
   notes: z.string().optional().nullable(),
 });
 
-export const checkOutSchema = z.object({
-  latitude: z.number().optional().nullable(),
-  longitude: z.number().optional().nullable(),
-  notes: z.string().optional().nullable(),
+export const checkOutSchema = z
+  .object({
+    latitude: z.number().optional().nullable(),
+    longitude: z.number().optional().nullable(),
+    notes: z.string().optional().nullable(),
+    dailyWorkReport: z.string().optional(),
+    report: z.string().optional(),
+    description: z.string().optional(),
+    blockers: z.string().max(1000).optional().nullable(),
+  })
+  .transform((data) => {
+    const raw = data.dailyWorkReport ?? data.report ?? data.description ?? '';
+    const trimmed = typeof raw === 'string' ? raw.trim() : '';
+    return {
+      ...data,
+      dailyWorkReport: trimmed,
+    };
+  })
+  .refine((data) => data.dailyWorkReport.length >= 100, {
+    message: 'Daily work report is required (minimum 100 characters)',
+    path: ['dailyWorkReport'],
+  })
+  .refine((data) => data.dailyWorkReport.length <= 10000, {
+    message: 'Daily work report must not exceed 10000 characters',
+    path: ['dailyWorkReport'],
+  });
+
+export const bulkDeleteNotificationsSchema = z.object({
+  ids: z
+    .array(z.string().uuid('Invalid notification ID'))
+    .min(1, 'At least one notification ID is required')
+    .max(100, 'Maximum 100 notifications can be deleted at once'),
 });
 
 // Project Schemas
@@ -300,3 +328,4 @@ export type CreateWorkScheduleInput = z.infer<typeof createWorkScheduleSchema>;
 export type UpdateWorkScheduleInput = z.infer<typeof updateWorkScheduleSchema>;
 export type CreateCalendarEventInput = z.infer<typeof createCalendarEventSchema>;
 export type UpdateCalendarEventInput = z.infer<typeof updateCalendarEventSchema>;
+export type BulkDeleteNotificationsInput = z.infer<typeof bulkDeleteNotificationsSchema>;

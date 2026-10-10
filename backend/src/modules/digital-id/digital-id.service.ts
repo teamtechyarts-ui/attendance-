@@ -52,7 +52,7 @@ export class DigitalIdService {
             );
           }
         }
-        return cards?.[0] || null;
+        return cards?.[0] ? DbService.toCamelCase(cards[0]) : null;
       }
     );
   }

@@ -7,9 +7,23 @@ import { config } from '../../config/env.js';
 import { CreateEmployeeInput, UpdateEmployeeInput } from '../../validation/index.js';
 import { AuthUser } from '../../types/index.js';
 import { RbacService } from '../../services/rbac.service.js';
-
-
+import { StorageService } from '../../services/storage.service.js';
+import { invalidateUserAuthSessions } from '../../middleware/auth.js';
 export class EmployeeService {
+  /**
+   * Resolve employee record by user ID
+   */
+  public static async resolveEmployeeByUserId(userId: string) {
+    if (!userId) return null;
+    return DbService.query(
+      async () => prisma.employee.findUnique({ where: { userId } }),
+      async () => {
+        const emps = await DbService.restRequest<any[]>(`/employees?user_id=eq.${userId}`);
+        return emps?.[0] || null;
+      }
+    );
+  }
+
   /**
    * Centralized Business Rule:
    * Determine whether an employee is currently active and eligible for new work
@@ -645,7 +659,18 @@ export class EmployeeService {
         delete data.workScheduleId;
 
         if (input.dateOfBirth) data.dateOfBirth = new Date(input.dateOfBirth);
-        if (input.joiningDate) data.joiningDate = new Date(input.joiningDate);
+        if (input.joiningDate !== undefined) {
+          if (input.joiningDate === null || input.joiningDate === '') {
+            data.joiningDate = null;
+          } else {
+            const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(input.joiningDate);
+            if (match) {
+              data.joiningDate = new Date(Date.UTC(parseInt(match[1], 10), parseInt(match[2], 10) - 1, parseInt(match[3], 10), 12, 0, 0));
+            } else {
+              data.joiningDate = new Date(input.joiningDate);
+            }
+          }
+        }
 
         const updated = await prisma.employee.update({
           where: { id },
@@ -664,16 +689,132 @@ export class EmployeeService {
           userAgent: clientInfo.userAgent,
         });
 
-        return updated;
+        return DbService.toCamelCase(updated);
       },
       async () => {
+        const restBody: any = { ...input };
+        if (input.joiningDate !== undefined) {
+          restBody.joining_date = input.joiningDate ? input.joiningDate.slice(0, 10) : null;
+          delete restBody.joiningDate;
+        }
         const updated = await DbService.restRequest(`/employees?id=eq.${id}`, {
           method: 'PATCH',
-          body: input,
+          body: restBody,
         });
-        return updated[0];
+        return updated?.[0] ? DbService.toCamelCase(updated[0]) : null;
       }
     );
+  }
+
+  /**
+   * Update Joining Date for an employee
+   */
+  public static async updateJoiningDate(
+    employeeId: string,
+    joiningDate: string | null | undefined,
+    actorUserId: string,
+    clientInfo: { ipAddress?: string; userAgent?: string }
+  ) {
+    // 1. Fetch current employee
+    const currentEmp = await DbService.query(
+      async () =>
+        prisma.employee.findUnique({
+          where: { id: employeeId },
+          select: { id: true, displayName: true, joiningDate: true },
+        }),
+      async () => {
+        const emps = await DbService.restRequest<any[]>(
+          `/employees?id=eq.${employeeId}&select=id,display_name,joining_date`
+        );
+        return emps?.[0] ? DbService.toCamelCase(emps[0]) : null;
+      }
+    );
+
+    if (!currentEmp) {
+      const err: any = new Error('Employee not found');
+      err.statusCode = 404;
+      err.code = 'EMPLOYEE_NOT_FOUND';
+      throw err;
+    }
+
+    let parsedDate: Date | null = null;
+    let formattedDateStr: string | null = null;
+
+    if (joiningDate !== null && joiningDate !== undefined && String(joiningDate).trim() !== '') {
+      const trimmed = String(joiningDate).trim();
+      const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+      if (!match) {
+        const err: any = new Error('Invalid date format. Expected YYYY-MM-DD');
+        err.statusCode = 400;
+        err.code = 'INVALID_DATE_FORMAT';
+        throw err;
+      }
+      const year = parseInt(match[1], 10);
+      const month = parseInt(match[2], 10);
+      const day = parseInt(match[3], 10);
+
+      if (year < 1950 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31) {
+        const err: any = new Error('Invalid date values for year, month, or day');
+        err.statusCode = 400;
+        err.code = 'INVALID_DATE_VALUES';
+        throw err;
+      }
+
+      // Check valid calendar day (e.g. leap years, days in month)
+      const testD = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+      if (testD.getUTCFullYear() !== year || testD.getUTCMonth() !== month - 1 || testD.getUTCDate() !== day) {
+        const err: any = new Error('Invalid calendar date');
+        err.statusCode = 400;
+        err.code = 'INVALID_CALENDAR_DATE';
+        throw err;
+      }
+
+      parsedDate = testD;
+      formattedDateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    }
+
+    const prevDateStr = currentEmp.joiningDate
+      ? (currentEmp.joiningDate instanceof Date
+          ? currentEmp.joiningDate.toISOString().slice(0, 10)
+          : String(currentEmp.joiningDate).slice(0, 10))
+      : 'Not set';
+
+    // 2. Update employee joining date only
+    const updated = await DbService.query(
+      async () => {
+        return await prisma.employee.update({
+          where: { id: employeeId },
+          data: { joiningDate: parsedDate },
+          include: { department: true, designation: true },
+        });
+      },
+      async () => {
+        const res = await DbService.restRequest<any[]>(`/employees?id=eq.${employeeId}`, {
+          method: 'PATCH',
+          body: { joining_date: formattedDateStr },
+        });
+        return res?.[0] ? DbService.toCamelCase(res[0]) : null;
+      }
+    );
+
+    // 3. Audit log
+    await AuditService.log({
+      userId: actorUserId,
+      employeeId,
+      action: 'UPDATE',
+      entityType: 'employee',
+      entityId: employeeId,
+      description: `Updated joining date for ${currentEmp.displayName} from ${prevDateStr} to ${formattedDateStr || 'Not set'}`,
+      ipAddress: clientInfo.ipAddress,
+      userAgent: clientInfo.userAgent,
+      metadata: {
+        field: 'joiningDate',
+        previousValue: prevDateStr,
+        newValue: formattedDateStr || null,
+      },
+    });
+
+    return DbService.toCamelCase(updated);
   }
 
   /**
@@ -960,6 +1101,134 @@ export class EmployeeService {
         return res[0];
       }
     );
+  }
+
+  /**
+   * Upload & Compress Profile Photo for authenticated employee
+   */
+  public static async uploadProfilePhoto(
+    employeeId: string,
+    userId: string,
+    imageData: string | Buffer
+  ): Promise<{ profilePhotoUrl: string; employee: any }> {
+    // 1. Validate image format, size, and magic bytes
+    const validation = StorageService.validateAndParseImage(imageData);
+    if (!validation.valid) {
+      const err: any = new Error(validation.error || 'Invalid image file');
+      err.statusCode = 400;
+      err.code = 'INVALID_IMAGE';
+      throw err;
+    }
+
+    // 2. Fetch current employee to know previous photo URL (to delete old photo after replacement)
+    const currentEmp = await DbService.query(
+      async () => prisma.employee.findUnique({ where: { id: employeeId }, select: { id: true, profilePhotoUrl: true } }),
+      async () => {
+        const emps = await DbService.restRequest<any[]>(`/employees?id=eq.${employeeId}&select=id,profile_photo_url`);
+        return emps?.[0] || null;
+      }
+    );
+
+    if (!currentEmp) {
+      const err: any = new Error('Employee record not found');
+      err.statusCode = 404;
+      err.code = 'EMPLOYEE_NOT_FOUND';
+      throw err;
+    }
+
+    const previousPhotoUrl = currentEmp.profilePhotoUrl || (currentEmp as any).profile_photo_url;
+
+    // 3. Upload new photo to Supabase Storage
+    const publicUrl = await StorageService.uploadProfilePhoto(
+      employeeId,
+      validation.buffer,
+      validation.mimeType,
+      validation.extension
+    );
+
+    // 4. Update employee record in database
+    const updatedEmployee = await DbService.query(
+      async () => {
+        return await prisma.employee.update({
+          where: { id: employeeId },
+          data: { profilePhotoUrl: publicUrl },
+          include: { department: true, designation: true },
+        });
+      },
+      async () => {
+        const res = await DbService.restRequest<any[]>(`/employees?id=eq.${employeeId}`, {
+          method: 'PATCH',
+          body: { profile_photo_url: publicUrl },
+        });
+        return res?.[0] || null;
+      }
+    );
+
+    // 5. Invalidate auth session cache so subsequent getMe() calls reflect the new photo immediately
+    invalidateUserAuthSessions(userId);
+
+    // 6. Clean up old image from storage only AFTER DB update succeeds
+    if (previousPhotoUrl && previousPhotoUrl !== publicUrl) {
+      StorageService.deleteFileByUrl(previousPhotoUrl).catch(() => {});
+    }
+
+    return {
+      profilePhotoUrl: publicUrl,
+      employee: DbService.toCamelCase(updatedEmployee),
+    };
+  }
+
+  /**
+   * Delete Profile Photo for authenticated employee
+   */
+  public static async deleteProfilePhoto(
+    employeeId: string,
+    userId: string
+  ): Promise<{ success: boolean; employee: any }> {
+    const currentEmp = await DbService.query(
+      async () => prisma.employee.findUnique({ where: { id: employeeId }, select: { id: true, profilePhotoUrl: true } }),
+      async () => {
+        const emps = await DbService.restRequest<any[]>(`/employees?id=eq.${employeeId}&select=id,profile_photo_url`);
+        return emps?.[0] || null;
+      }
+    );
+
+    if (!currentEmp) {
+      const err: any = new Error('Employee record not found');
+      err.statusCode = 404;
+      err.code = 'EMPLOYEE_NOT_FOUND';
+      throw err;
+    }
+
+    const previousPhotoUrl = currentEmp.profilePhotoUrl || (currentEmp as any).profile_photo_url;
+
+    const updatedEmployee = await DbService.query(
+      async () => {
+        return await prisma.employee.update({
+          where: { id: employeeId },
+          data: { profilePhotoUrl: null },
+          include: { department: true, designation: true },
+        });
+      },
+      async () => {
+        const res = await DbService.restRequest<any[]>(`/employees?id=eq.${employeeId}`, {
+          method: 'PATCH',
+          body: { profile_photo_url: null },
+        });
+        return res?.[0] || null;
+      }
+    );
+
+    invalidateUserAuthSessions(userId);
+
+    if (previousPhotoUrl) {
+      StorageService.deleteFileByUrl(previousPhotoUrl).catch(() => {});
+    }
+
+    return {
+      success: true,
+      employee: DbService.toCamelCase(updatedEmployee),
+    };
   }
 
   /**

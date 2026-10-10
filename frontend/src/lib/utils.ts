@@ -14,6 +14,20 @@ export function formatSecondsToTime(seconds: number): string {
 
 export function formatDate(dateString: string | Date | null | undefined): string {
   if (!dateString) return '—';
+  if (typeof dateString === 'string') {
+    const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(dateString.trim());
+    if (match) {
+      const year = parseInt(match[1], 10);
+      const month = parseInt(match[2], 10) - 1;
+      const day = parseInt(match[3], 10);
+      const localD = new Date(year, month, day);
+      return new Intl.DateTimeFormat('en-US', {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+      }).format(localD);
+    }
+  }
   const d = typeof dateString === 'string' ? new Date(dateString) : dateString;
   return new Intl.DateTimeFormat('en-US', {
     month: 'short',

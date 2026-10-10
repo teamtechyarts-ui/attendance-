@@ -63,6 +63,10 @@ export const createEmployeeSchema = z.object({
 
 export const updateEmployeeSchema = createEmployeeSchema.partial().omit({ email: true, password: true });
 
+export const updateJoiningDateSchema = z.object({
+  joiningDate: z.string().nullable().optional(),
+});
+
 export const updateSelfProfileSchema = z.object({
   displayName: z.string().min(1).optional(),
   phone: z.string().optional().nullable(),
@@ -86,10 +90,38 @@ export const checkInSchema = z.object({
   notes: z.string().optional().nullable(),
 });
 
-export const checkOutSchema = z.object({
-  latitude: z.number().optional().nullable(),
-  longitude: z.number().optional().nullable(),
-  notes: z.string().optional().nullable(),
+export const checkOutSchema = z
+  .object({
+    latitude: z.number().optional().nullable(),
+    longitude: z.number().optional().nullable(),
+    notes: z.string().optional().nullable(),
+    dailyWorkReport: z.string().optional(),
+    report: z.string().optional(),
+    description: z.string().optional(),
+    blockers: z.string().max(1000).optional().nullable(),
+  })
+  .transform((data) => {
+    const raw = data.dailyWorkReport ?? data.report ?? data.description ?? '';
+    const trimmed = typeof raw === 'string' ? raw.trim() : '';
+    return {
+      ...data,
+      dailyWorkReport: trimmed,
+    };
+  })
+  .refine((data) => data.dailyWorkReport.length >= 100, {
+    message: 'Daily work report is required (minimum 100 characters)',
+    path: ['dailyWorkReport'],
+  })
+  .refine((data) => data.dailyWorkReport.length <= 10000, {
+    message: 'Daily work report must not exceed 10000 characters',
+    path: ['dailyWorkReport'],
+  });
+
+export const bulkDeleteNotificationsSchema = z.object({
+  ids: z
+    .array(z.string().uuid('Invalid notification ID'))
+    .min(1, 'At least one notification ID is required')
+    .max(100, 'Maximum 100 notifications can be deleted at once'),
 });
 
 export const attendanceHistoryQuerySchema = z.object({
@@ -361,6 +393,7 @@ export type ForgotPasswordInput = z.infer<typeof forgotPasswordSchema>;
 export type ResetPasswordInput = z.infer<typeof resetPasswordSchema>;
 export type CreateEmployeeInput = z.infer<typeof createEmployeeSchema>;
 export type UpdateEmployeeInput = z.infer<typeof updateEmployeeSchema>;
+export type UpdateJoiningDateInput = z.infer<typeof updateJoiningDateSchema>;
 export type CheckInInput = z.infer<typeof checkInSchema>;
 export type CheckOutInput = z.infer<typeof checkOutSchema>;
 export type CreateProjectInput = z.infer<typeof createProjectSchema>;
@@ -383,3 +416,4 @@ export type UpdateWorkScheduleInput = z.infer<typeof updateWorkScheduleSchema>;
 export type CreateCalendarEventInput = z.infer<typeof createCalendarEventSchema>;
 export type UpdateCalendarEventInput = z.infer<typeof updateCalendarEventSchema>;
 export type AttendanceHistoryQueryInput = z.infer<typeof attendanceHistoryQuerySchema>;
+export type BulkDeleteNotificationsInput = z.infer<typeof bulkDeleteNotificationsSchema>;

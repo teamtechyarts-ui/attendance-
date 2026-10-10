@@ -360,6 +360,13 @@ export class CalendarService {
     }
 
     const isHoliday = input.eventType === 'HOLIDAY';
+    if (isHoliday && user.role !== 'SUPER_ADMIN' && user.role !== 'ADMIN') {
+      const err: any = new Error('Forbidden: Only authorized administrators can create company holidays');
+      err.statusCode = 403;
+      err.code = 'FORBIDDEN_HOLIDAY_MANAGEMENT';
+      throw err;
+    }
+
     let eventStartAt = new Date(input.startAt);
     let eventEndAt = new Date(input.endAt);
     let isAllDay = input.allDay || isHoliday;
@@ -367,15 +374,20 @@ export class CalendarService {
 
     if (isHoliday) {
       holidayDateStr = typeof input.startAt === 'string' ? input.startAt.slice(0, 10) : new Date(input.startAt).toISOString().slice(0, 10);
-      eventStartAt = new Date(`${holidayDateStr}T00:00:00.000Z`);
-      eventEndAt = new Date(`${holidayDateStr}T23:59:59.999Z`);
+      const [y, m, d] = holidayDateStr.split('-').map(Number);
+      eventStartAt = new Date(Date.UTC(y, m - 1, d, 0, 0, 0, 0));
+      eventEndAt = new Date(Date.UTC(y, m - 1, d, 23, 59, 59, 999));
       isAllDay = true;
     } else if (input.allDay) {
       const startDayStr = typeof input.startAt === 'string' ? input.startAt.slice(0, 10) : new Date(input.startAt).toISOString().slice(0, 10);
       const endDayStr = typeof input.endAt === 'string' ? input.endAt.slice(0, 10) : new Date(input.endAt).toISOString().slice(0, 10);
-      eventStartAt = new Date(`${startDayStr}T00:00:00.000Z`);
-      eventEndAt = new Date(`${endDayStr}T23:59:59.999Z`);
+      const [sy, sm, sd] = startDayStr.split('-').map(Number);
+      const [ey, em, ed] = endDayStr.split('-').map(Number);
+      eventStartAt = new Date(Date.UTC(sy, sm - 1, sd, 0, 0, 0, 0));
+      eventEndAt = new Date(Date.UTC(ey, em - 1, ed, 23, 59, 59, 999));
     }
+
+    const effectiveVisibility = isHoliday ? 'EVERYONE' : visibility;
 
     const created = await DbService.query(
       async () => {
@@ -384,21 +396,27 @@ export class CalendarService {
             title: input.title,
             description: input.description || null,
             eventType: input.eventType || 'OTHER',
-            visibility,
+            visibility: effectiveVisibility,
             startAt: eventStartAt,
             endAt: eventEndAt,
             allDay: isAllDay,
             createdBy: user.id,
-            employeeId: input.employeeId || (input.attendeeIds && input.attendeeIds.length === 1 ? input.attendeeIds[0] : null),
+            employeeId: isHoliday ? null : (input.employeeId || (input.attendeeIds && input.attendeeIds.length === 1 ? input.attendeeIds[0] : null)),
           },
         });
 
-        // If event is HOLIDAY, synchronize to holidays table for attendance & work schedule recognition
+        // If event is HOLIDAY, synchronize to authoritative holidays table
         if (isHoliday && holidayDateStr) {
           try {
-            const holDate = new Date(`${holidayDateStr}T00:00:00.000Z`);
+            const [hy, hm, hd] = holidayDateStr.split('-').map(Number);
+            const holDate = new Date(Date.UTC(hy, hm - 1, hd, 0, 0, 0, 0));
             const existingHol = await prisma.holiday.findFirst({
-              where: { holidayDate: holDate },
+              where: {
+                holidayDate: {
+                  gte: eventStartAt,
+                  lte: eventEndAt,
+                },
+              },
             });
             if (existingHol) {
               await prisma.holiday.update({
@@ -637,18 +655,85 @@ export class CalendarService {
           throw err;
         }
 
+        const willBeHoliday = (input.eventType as any) === 'HOLIDAY' || (existing.eventType === 'HOLIDAY' && (input.eventType === undefined || (input.eventType as any) === 'HOLIDAY'));
+        const wasHoliday = existing.eventType === 'HOLIDAY';
+        const changedAwayFromHoliday = wasHoliday && input.eventType !== undefined && (input.eventType as any) !== 'HOLIDAY';
+
+        if (willBeHoliday || wasHoliday) {
+          if (user.role !== 'SUPER_ADMIN' && user.role !== 'ADMIN') {
+            const err: any = new Error('Forbidden: Only authorized administrators can manage company holidays');
+            err.statusCode = 403;
+            err.code = 'FORBIDDEN_HOLIDAY_MANAGEMENT';
+            throw err;
+          }
+        }
+
+        let updateData: any = {
+          title: input.title !== undefined ? input.title : undefined,
+          description: input.description !== undefined ? input.description : undefined,
+          eventType: input.eventType !== undefined ? input.eventType : undefined,
+          visibility: input.visibility !== undefined ? input.visibility : undefined,
+          startAt: input.startAt !== undefined ? new Date(input.startAt) : undefined,
+          endAt: input.endAt !== undefined ? new Date(input.endAt) : undefined,
+          allDay: input.allDay !== undefined ? input.allDay : undefined,
+          employeeId: input.employeeId !== undefined ? input.employeeId : undefined,
+        };
+
+        if (willBeHoliday) {
+          const rawTarget = input.startAt ? input.startAt : existing.startAt;
+          const targetDateStr = typeof rawTarget === 'string' ? rawTarget.slice(0, 10) : new Date(rawTarget).toISOString().slice(0, 10);
+          const [y, m, d] = targetDateStr.split('-').map(Number);
+          const holDate = new Date(Date.UTC(y, m - 1, d, 0, 0, 0, 0));
+          const holStartAt = new Date(Date.UTC(y, m - 1, d, 0, 0, 0, 0));
+          const holEndAt = new Date(Date.UTC(y, m - 1, d, 23, 59, 59, 999));
+
+          updateData = {
+            ...updateData,
+            eventType: 'HOLIDAY',
+            visibility: 'EVERYONE',
+            startAt: holStartAt,
+            endAt: holEndAt,
+            allDay: true,
+            employeeId: null,
+          };
+
+          // Synchronize with authoritative holidays table
+          const holidayTitle = input.title || existing.title;
+          const holidayDesc = input.description !== undefined ? input.description : existing.description;
+          const existingHol = await prisma.holiday.findFirst({
+            where: {
+              holidayDate: { gte: holStartAt, lte: holEndAt },
+            },
+          });
+          if (existingHol) {
+            await prisma.holiday.update({
+              where: { id: existingHol.id },
+              data: { name: holidayTitle, description: holidayDesc },
+            });
+          } else {
+            await prisma.holiday.create({
+              data: {
+                name: holidayTitle,
+                description: holidayDesc,
+                holidayDate: holDate,
+                isOptional: false,
+              },
+            });
+          }
+        } else if (changedAwayFromHoliday) {
+          // Changed away from HOLIDAY -> remove from authoritative holidays table
+          const oldDateStr = typeof existing.startAt === 'string' ? (existing.startAt as string).slice(0, 10) : existing.startAt.toISOString().slice(0, 10);
+          const [oy, om, od] = oldDateStr.split('-').map(Number);
+          const oldStart = new Date(Date.UTC(oy, om - 1, od, 0, 0, 0, 0));
+          const oldEnd = new Date(Date.UTC(oy, om - 1, od, 23, 59, 59, 999));
+          await prisma.holiday.deleteMany({
+            where: { holidayDate: { gte: oldStart, lte: oldEnd } },
+          });
+        }
+
         await prisma.calendarEvent.update({
           where: { id },
-          data: {
-            title: input.title !== undefined ? input.title : undefined,
-            description: input.description !== undefined ? input.description : undefined,
-            eventType: input.eventType !== undefined ? input.eventType : undefined,
-            visibility: input.visibility !== undefined ? input.visibility : undefined,
-            startAt: input.startAt !== undefined ? new Date(input.startAt) : undefined,
-            endAt: input.endAt !== undefined ? new Date(input.endAt) : undefined,
-            allDay: input.allDay !== undefined ? input.allDay : undefined,
-            employeeId: input.employeeId !== undefined ? input.employeeId : undefined,
-          },
+          data: updateData,
         });
 
         if (input.attendeeIds && Array.isArray(input.attendeeIds)) {
@@ -686,7 +771,33 @@ export class CalendarService {
           method: 'PATCH',
           body: input,
         });
-        return res[0];
+        const updatedEv = res?.[0];
+
+        // Symmetrically sync REST fallback for holiday
+        if (input.eventType === 'HOLIDAY') {
+          const rawStart = input.startAt || updatedEv?.start_at || updatedEv?.startAt;
+          if (rawStart) {
+            const dateStr = typeof rawStart === 'string' ? rawStart.slice(0, 10) : new Date(rawStart).toISOString().slice(0, 10);
+            const existingHols = await DbService.restRequest<any[]>(`/holidays?holiday_date=eq.${dateStr}`);
+            if (existingHols && existingHols.length > 0) {
+              await DbService.restRequest(`/holidays?id=eq.${existingHols[0].id}`, {
+                method: 'PATCH',
+                body: { name: input.title || updatedEv?.title },
+              });
+            } else {
+              await DbService.restRequest('/holidays', {
+                method: 'POST',
+                body: {
+                  id: randomUUID(),
+                  name: input.title || updatedEv?.title || 'Holiday',
+                  holiday_date: dateStr,
+                  is_optional: false,
+                },
+              });
+            }
+          }
+        }
+        return updatedEv;
       }
     );
 
@@ -757,22 +868,32 @@ export class CalendarService {
           throw err;
         }
 
-        const isStaff = user.role === 'SUPER_ADMIN' || user.role === 'ADMIN' || user.role === 'MANAGER';
-        if (!isStaff && existing.createdBy !== user.id) {
-          const err: any = new Error('Forbidden: Only event creator or admins can delete this event');
-          err.statusCode = 403;
-          throw err;
-        }
-
         if (existing.eventType === 'HOLIDAY') {
+          if (user.role !== 'SUPER_ADMIN' && user.role !== 'ADMIN') {
+            const err: any = new Error('Forbidden: Only authorized administrators can delete company holidays');
+            err.statusCode = 403;
+            err.code = 'FORBIDDEN_HOLIDAY_MANAGEMENT';
+            throw err;
+          }
           try {
             const rawStart = existing.startAt;
             const dateStr = rawStart instanceof Date ? rawStart.toISOString().slice(0, 10) : typeof rawStart === 'string' ? (rawStart as string).slice(0, 10) : new Date(rawStart as any).toISOString().slice(0, 10);
             if (dateStr) {
-              const holDate = new Date(`${dateStr}T00:00:00.000Z`);
-              await prisma.holiday.deleteMany({ where: { holidayDate: holDate } });
+              const [y, m, d] = dateStr.split('-').map(Number);
+              const holStart = new Date(Date.UTC(y, m - 1, d, 0, 0, 0, 0));
+              const holEnd = new Date(Date.UTC(y, m - 1, d, 23, 59, 59, 999));
+              await prisma.holiday.deleteMany({
+                where: { holidayDate: { gte: holStart, lte: holEnd } },
+              });
             }
           } catch {}
+        } else {
+          const isStaff = user.role === 'SUPER_ADMIN' || user.role === 'ADMIN' || user.role === 'MANAGER';
+          if (!isStaff && existing.createdBy !== user.id) {
+            const err: any = new Error('Forbidden: Only event creator or admins can delete this event');
+            err.statusCode = 403;
+            throw err;
+          }
         }
 
         await prisma.calendarEvent.delete({ where: { id } });

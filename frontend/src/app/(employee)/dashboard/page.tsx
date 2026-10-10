@@ -10,6 +10,7 @@ import { Badge } from '@/components/ui/badge';
 import { EmptyState } from '@/components/ui/empty-state';
 import { LoadingState } from '@/components/ui/loading-state';
 import { CheckInModal } from '@/components/attendance/check-in-modal';
+import { CheckoutModal } from '@/components/attendance/checkout-modal';
 import { formatSecondsToTime, formatDate, formatTime } from '@/lib/utils';
 import {
   Briefcase,
@@ -45,6 +46,7 @@ export default function EmployeeDashboard() {
   const [todayReport, setTodayReport] = useState<any>(null);
   const [reportText, setReportText] = useState('');
   const [isCheckInOpen, setIsCheckInOpen] = useState(false);
+  const [isCheckOutOpen, setIsCheckOutOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmittingReport, setIsSubmittingReport] = useState(false);
 
@@ -81,15 +83,14 @@ export default function EmployeeDashboard() {
     loadData();
   }, [loadData]);
 
-  const handleCheckOut = async () => {
-    try {
-      const res = await attendanceApi.checkOut({});
-      markAttendanceSuccess(res);
-      await refreshTimer();
-      loadData();
-    } catch (err: any) {
-      alert(err.message || 'Failed to check out');
-    }
+  const handleCheckOut = () => {
+    setIsCheckOutOpen(true);
+  };
+
+  const handleCheckOutSuccess = async (res: any) => {
+    markAttendanceSuccess(res);
+    await refreshTimer();
+    loadData();
   };
 
   const handleReportSubmit = async (e: React.FormEvent) => {
@@ -454,6 +455,15 @@ export default function EmployeeDashboard() {
         isOpen={isCheckInOpen}
         onClose={() => setIsCheckInOpen(false)}
         onSuccess={loadData}
+      />
+
+      <CheckoutModal
+        isOpen={isCheckOutOpen}
+        onClose={() => setIsCheckOutOpen(false)}
+        onSuccess={handleCheckOutSuccess}
+        activeTimerRunning={Boolean(activeTimer && activeTimer.isActive)}
+        activeTaskTitle={focusTask?.title}
+        initialReportText={reportText}
       />
     </div>
   );

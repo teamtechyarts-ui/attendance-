@@ -26,6 +26,7 @@ import { auditRoutes } from './modules/audit/audit.routes.js';
 import { emailRoutes } from './modules/email/email.routes.js';
 import { rbacRoutes } from './modules/rbac/rbac.routes.js';
 import { schedulerRoutes } from './modules/scheduler/scheduler.routes.js';
+import { holidayRoutes } from './modules/holiday/holiday.routes.js';
 import websocket from '@fastify/websocket';
 import { collaborationRoutes } from './modules/collaboration/chat.routes.js';
 
@@ -199,6 +200,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(reportRoutes, { prefix: '/api/reports' });
   await app.register(feedbackRoutes, { prefix: '/api/feedback' });
   await app.register(calendarRoutes, { prefix: '/api/calendar' });
+  await app.register(holidayRoutes, { prefix: '/api/holidays' });
   await app.register(digitalIdRoutes, { prefix: '/api/digital-id' });
   await app.register(notificationRoutes, { prefix: '/api/notifications' });
   await app.register(auditRoutes, { prefix: '/api/audit' });

@@ -115,12 +115,61 @@ export async function notificationRoutes(fastify: FastifyInstance) {
   fastify.post('/read-all', markAllHandler);
   fastify.patch('/read-all', markAllHandler);
 
+  // Bulk delete notifications (supports DELETE /bulk and POST /bulk-delete)
+  const bulkDeleteHandler = async (request: FastifyRequest, reply: FastifyReply) => {
+    const userId = request.user!.id;
+    const { ids } = (request.body || {}) as { ids: string[] };
+    if (!ids || !Array.isArray(ids) || ids.length === 0) {
+      return reply.status(400).send({
+        success: false,
+        error: { code: 'INVALID_REQUEST', message: 'At least one notification ID is required' },
+      });
+    }
+
+    const result = await NotificationService.bulkDeleteNotifications(ids, userId);
+    return reply.send({
+      success: true,
+      data: {
+        message: `Successfully deleted ${result.deletedCount} notification(s)`,
+        deletedCount: result.deletedCount,
+        deletedIds: result.deletedIds,
+      },
+    });
+  };
+
+  fastify.delete('/bulk', bulkDeleteHandler);
+  fastify.post('/bulk-delete', bulkDeleteHandler);
+
+  // Delete ALL notifications for current user
+  const deleteAllHandler = async (request: FastifyRequest, reply: FastifyReply) => {
+    const userId = request.user!.id;
+    const result = await NotificationService.deleteAllNotifications(userId);
+    return reply.send({
+      success: true,
+      data: {
+        message: `Successfully deleted ${result.deletedCount} notification(s)`,
+        deletedCount: result.deletedCount,
+      },
+    });
+  };
+
+  fastify.delete('/all', deleteAllHandler);
+  fastify.delete('/delete-all', deleteAllHandler);
+  fastify.delete('/clear-all', deleteAllHandler);
+  fastify.post('/delete-all', deleteAllHandler);
+
   // Delete single notification
   fastify.delete('/:id', async (request: FastifyRequest, reply: FastifyReply) => {
     const { id } = request.params as { id: string };
     const userId = request.user!.id;
 
-    await NotificationService.deleteNotification(id, userId);
+    const deleted = await NotificationService.deleteNotification(id, userId);
+    if (!deleted) {
+      return reply.status(404).send({
+        success: false,
+        error: { code: 'NOT_FOUND', message: 'Notification not found or access denied' },
+      });
+    }
     return reply.send({ success: true, data: { message: 'Notification deleted', id } });
   });
 }

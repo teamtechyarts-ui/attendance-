@@ -1,6 +1,6 @@
 import { FastifyReply, FastifyRequest } from 'fastify';
 import { EmployeeService } from './employee.service.js';
-import { createEmployeeSchema, updateEmployeeSchema, updateSelfProfileSchema } from '../../validation/index.js';
+import { createEmployeeSchema, updateEmployeeSchema, updateJoiningDateSchema, updateSelfProfileSchema } from '../../validation/index.js';
 import { RbacService } from '../../services/rbac.service.js';
 
 export class EmployeeController {
@@ -94,6 +94,22 @@ export class EmployeeController {
     });
   }
 
+  public static async updateJoiningDate(request: FastifyRequest, reply: FastifyReply) {
+    const { id } = request.params as { id: string };
+    const { joiningDate } = updateJoiningDateSchema.parse(request.body);
+
+    const emp = await EmployeeService.updateJoiningDate(id, joiningDate || null, request.user!.id, {
+      ipAddress: request.ip,
+      userAgent: request.headers['user-agent'],
+    });
+
+    return reply.send({
+      success: true,
+      data: emp,
+      message: 'Joining date updated successfully',
+    });
+  }
+
   public static async updateSelfProfile(request: FastifyRequest, reply: FastifyReply) {
     if (!request.user?.employeeId) {
       return reply.status(400).send({
@@ -108,6 +124,56 @@ export class EmployeeController {
     return reply.send({
       success: true,
       data: emp,
+    });
+  }
+
+  public static async uploadProfilePhoto(request: FastifyRequest, reply: FastifyReply) {
+    let employeeId = request.user?.employeeId;
+    if (!employeeId) {
+      const emp = await EmployeeService.resolveEmployeeByUserId(request.user!.id);
+      employeeId = emp?.id;
+    }
+
+    if (!employeeId) {
+      return reply.status(400).send({
+        success: false,
+        error: { code: 'EMPLOYEE_PROFILE_REQUIRED', message: 'Employee profile not associated' },
+      });
+    }
+
+    const body = (request.body || {}) as { image?: string };
+    if (!body.image || typeof body.image !== 'string') {
+      return reply.status(400).send({
+        success: false,
+        error: { code: 'INVALID_IMAGE', message: 'Image data URL is required' },
+      });
+    }
+
+    const result = await EmployeeService.uploadProfilePhoto(employeeId, request.user!.id, body.image);
+    return reply.send({
+      success: true,
+      data: result,
+    });
+  }
+
+  public static async deleteProfilePhoto(request: FastifyRequest, reply: FastifyReply) {
+    let employeeId = request.user?.employeeId;
+    if (!employeeId) {
+      const emp = await EmployeeService.resolveEmployeeByUserId(request.user!.id);
+      employeeId = emp?.id;
+    }
+
+    if (!employeeId) {
+      return reply.status(400).send({
+        success: false,
+        error: { code: 'EMPLOYEE_PROFILE_REQUIRED', message: 'Employee profile not associated' },
+      });
+    }
+
+    const result = await EmployeeService.deleteProfilePhoto(employeeId, request.user!.id);
+    return reply.send({
+      success: true,
+      data: result,
     });
   }
 

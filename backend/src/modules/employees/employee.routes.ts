@@ -8,6 +8,8 @@ export async function employeeRoutes(fastify: FastifyInstance) {
 
   // Self Profile Update
   fastify.put('/me/profile', EmployeeController.updateSelfProfile);
+  fastify.post('/me/profile-photo', EmployeeController.uploadProfilePhoto);
+  fastify.delete('/me/profile-photo', EmployeeController.deleteProfilePhoto);
 
   // Next Employee Code helper
   fastify.get('/next-code', { preHandler: [requirePermission('EMPLOYEE_CREATE')] }, EmployeeController.getNextCode);
@@ -20,6 +22,9 @@ export async function employeeRoutes(fastify: FastifyInstance) {
   fastify.get('/:id', { preHandler: [requirePermission('EMPLOYEE_VIEW')] }, EmployeeController.getById);
   fastify.post('/', { preHandler: [requirePermission('EMPLOYEE_CREATE')] }, EmployeeController.create);
   fastify.put('/:id', { preHandler: [requirePermission('EMPLOYEE_EDIT')] }, EmployeeController.update);
+  fastify.patch('/:id', { preHandler: [requirePermission('EMPLOYEE_EDIT')] }, EmployeeController.update);
+  fastify.patch('/:id/joining-date', { preHandler: [requirePermission('EMPLOYEE_EDIT')] }, EmployeeController.updateJoiningDate);
+  fastify.put('/:id/joining-date', { preHandler: [requirePermission('EMPLOYEE_EDIT')] }, EmployeeController.updateJoiningDate);
   fastify.post('/:id/resend-onboarding', { preHandler: [requirePermission('EMPLOYEE_EDIT')] }, EmployeeController.resendOnboarding);
   fastify.post('/:id/reactivate', { preHandler: [requirePermission('EMPLOYEE_DEACTIVATE')] }, EmployeeController.reactivate);
   fastify.post('/:id/activate', { preHandler: [requirePermission('EMPLOYEE_DEACTIVATE')] }, EmployeeController.reactivate);

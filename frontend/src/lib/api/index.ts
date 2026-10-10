@@ -96,6 +96,12 @@ export const employeesApi = {
   getNextCode: () => api.get<{ nextEmployeeCode: string }>('/api/employees/next-code'),
   updateMe: (data: any) => api.put<Employee>('/api/employees/me', data),
   updateSelfProfile: (data: any) => api.put<Employee>('/api/employees/me/profile', data),
+  uploadProfilePhoto: (data: { image: string }) =>
+    api.post<{ profilePhotoUrl: string; employee: Employee }>('/api/employees/me/profile-photo', data),
+  deleteProfilePhoto: () =>
+    api.delete<{ success: boolean; employee: Employee }>('/api/employees/me/profile-photo'),
+  updateJoiningDate: (id: string, joiningDate: string | null) =>
+    api.patch<Employee>(`/api/employees/${id}/joining-date`, { joiningDate }),
 };
 
 export const attendanceApi = {
@@ -330,6 +336,28 @@ export const notificationsApi = {
   markRead: (id: string) => api.patch<NotificationItem>(`/api/notifications/${id}/read`),
   markAllRead: () => api.post<{ message: string; count: number }>('/api/notifications/read-all'),
   delete: (id: string) => api.delete<{ message: string }>(`/api/notifications/${id}`),
+  bulkDelete: async (ids: string[]) => {
+    try {
+      return await api.delete<{ message: string; deletedCount: number; deletedIds: string[] }>('/api/notifications/bulk', {
+        body: JSON.stringify({ ids }),
+      });
+    } catch (err: any) {
+      if (err.status === 400 || err.status === 405 || err.status === 404) {
+        return await api.post<{ message: string; deletedCount: number; deletedIds: string[] }>('/api/notifications/bulk-delete', { ids });
+      }
+      throw err;
+    }
+  },
+  deleteAll: async () => {
+    try {
+      return await api.delete<{ message: string; deletedCount: number }>('/api/notifications/all');
+    } catch (err: any) {
+      if (err.status === 405 || err.status === 404) {
+        return await api.post<{ message: string; deletedCount: number }>('/api/notifications/delete-all');
+      }
+      throw err;
+    }
+  },
 };
 
 export const metadataApi = {

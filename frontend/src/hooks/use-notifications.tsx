@@ -16,6 +16,8 @@ interface NotificationsContextValue {
   markAsRead: (id: string) => Promise<void>;
   markAllAsRead: () => Promise<void>;
   deleteNotification: (id: string) => Promise<void>;
+  bulkDeleteNotifications: (ids: string[]) => Promise<{ deletedCount: number; deletedIds: string[] }>;
+  deleteAllNotifications: () => Promise<{ deletedCount: number }>;
   refresh: () => Promise<void>;
 }
 
@@ -56,7 +58,7 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
 
     try {
       const [items, countRes] = await Promise.all([
-        notificationsApi.list({ limit: 20 }),
+        notificationsApi.list({ limit: 50 }),
         notificationsApi.getUnreadCount(),
       ]);
 
@@ -118,7 +120,7 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
       }
 
       try {
-        const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+        const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'https://teamsapi.techyarts.com';
         
         // Note: EventSource sends session cookies across origins when withCredentials: true
         const sseUrl = `${apiUrl}/api/notifications/stream`;
@@ -231,7 +233,7 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
     }
   }, [fetchNotifications]);
 
-  // Delete notification
+  // Delete single notification
   const deleteNotification = useCallback(async (id: string) => {
     const target = notifications.find((n) => n.id === id);
     const wasUnread = target && !target.isRead;
@@ -244,10 +246,56 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
 
     try {
       await notificationsApi.delete(id);
-    } catch {
+    } catch (err) {
+      // Rollback on failure
       fetchNotifications(true);
+      throw err;
     }
   }, [notifications, fetchNotifications]);
+
+  // Bulk delete notifications
+  const bulkDeleteNotifications = useCallback(async (ids: string[]) => {
+    if (!ids || ids.length === 0) return { deletedCount: 0, deletedIds: [] };
+
+    const idSet = new Set(ids);
+    const deletedUnreadCount = notifications.filter((n) => idSet.has(n.id) && !n.isRead).length;
+
+    // Optimistic update
+    setNotifications((prev) => prev.filter((n) => !idSet.has(n.id)));
+    if (deletedUnreadCount > 0) {
+      setUnreadCount((prev) => Math.max(0, prev - deletedUnreadCount));
+    }
+
+    try {
+      const res = await notificationsApi.bulkDelete(ids);
+      return {
+        deletedCount: res?.deletedCount ?? ids.length,
+        deletedIds: res?.deletedIds ?? ids,
+      };
+    } catch (err) {
+      // Rollback on failure
+      fetchNotifications(true);
+      throw err;
+    }
+  }, [notifications, fetchNotifications]);
+
+  // Delete ALL notifications for current user across all pages
+  const deleteAllNotifications = useCallback(async () => {
+    // Optimistic update
+    setNotifications([]);
+    setUnreadCount(0);
+
+    try {
+      const res = await notificationsApi.deleteAll();
+      return {
+        deletedCount: res?.deletedCount ?? 0,
+      };
+    } catch (err) {
+      // Rollback on failure
+      fetchNotifications(true);
+      throw err;
+    }
+  }, [fetchNotifications]);
 
   return (
     <NotificationsContext.Provider
@@ -261,6 +309,8 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
         markAsRead,
         markAllAsRead,
         deleteNotification,
+        bulkDeleteNotifications,
+        deleteAllNotifications,
         refresh: () => fetchNotifications(false),
       }}
     >

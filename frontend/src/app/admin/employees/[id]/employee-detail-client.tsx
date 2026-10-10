@@ -14,6 +14,8 @@ import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@
 import { LoadingState } from '@/components/ui/loading-state';
 import { formatDate, formatTime, formatSecondsToTime } from '@/lib/utils';
 import { Dialog } from '@/components/ui/dialog';
+import { useAuth } from '@/hooks/use-auth';
+import { isSuperAdmin, hasPermission } from '@/lib/permissions';
 import {
   ArrowLeft,
   Briefcase,
@@ -33,6 +35,7 @@ import {
   Lock,
   Unlock,
   Settings2,
+  Pencil,
 } from 'lucide-react';
 
 export default function EmployeeDetailClient() {
@@ -83,6 +86,78 @@ export default function EmployeeDetailClient() {
   // RBAC Access Control State
   const [assignment, setAssignment] = useState<LimitedAdminAssignment | null>(null);
   const [isManageAccessOpen, setIsManageAccessOpen] = useState(false);
+
+  // Edit Joining Date State
+  const { user: currentUser } = useAuth();
+  const canEditJoiningDate = isSuperAdmin(currentUser) || hasPermission(currentUser, 'EMPLOYEE_EDIT');
+
+  const [isEditJoiningDateOpen, setIsEditJoiningDateOpen] = useState(false);
+  const [joiningDateInput, setJoiningDateInput] = useState('');
+  const [isSavingJoiningDate, setIsSavingJoiningDate] = useState(false);
+  const [joiningDateError, setJoiningDateError] = useState<string | null>(null);
+  const [joiningDateSuccess, setJoiningDateSuccess] = useState<string | null>(null);
+
+  const toDateInputValue = useCallback((dateString: string | Date | null | undefined): string => {
+    if (!dateString) return '';
+    if (typeof dateString === 'string') {
+      const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(dateString.trim());
+      if (match) return `${match[1]}-${match[2]}-${match[3]}`;
+    }
+    const d = new Date(dateString);
+    if (isNaN(d.getTime())) return '';
+    return d.toISOString().slice(0, 10);
+  }, []);
+
+  const handleOpenEditJoiningDate = () => {
+    setJoiningDateInput(toDateInputValue(employee?.joiningDate));
+    setJoiningDateError(null);
+    setJoiningDateSuccess(null);
+    setIsEditJoiningDateOpen(true);
+  };
+
+  const handleSaveJoiningDate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!employee || isSavingJoiningDate) return;
+
+    setJoiningDateError(null);
+    setJoiningDateSuccess(null);
+
+    const trimmed = joiningDateInput.trim();
+    if (trimmed) {
+      const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+      if (!match) {
+        setJoiningDateError('Please enter a valid date in YYYY-MM-DD format');
+        return;
+      }
+      const year = parseInt(match[1], 10);
+      const month = parseInt(match[2], 10);
+      const day = parseInt(match[3], 10);
+      if (year < 1950 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31) {
+        setJoiningDateError('Date values are out of allowable range (1950-2100)');
+        return;
+      }
+      const testD = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+      if (testD.getUTCFullYear() !== year || testD.getUTCMonth() !== month - 1 || testD.getUTCDate() !== day) {
+        setJoiningDateError('Invalid calendar date');
+        return;
+      }
+    }
+
+    setIsSavingJoiningDate(true);
+    try {
+      const updated = await employeesApi.updateJoiningDate(employee.id, trimmed || null);
+      setEmployee((prev) => (prev ? { ...prev, joiningDate: updated.joiningDate || (trimmed ? trimmed : null) } : prev));
+      setJoiningDateSuccess('Joining date updated successfully');
+      setTimeout(() => {
+        setIsEditJoiningDateOpen(false);
+        setJoiningDateSuccess(null);
+      }, 500);
+    } catch (err: any) {
+      setJoiningDateError(err.message || 'Failed to update joining date');
+    } finally {
+      setIsSavingJoiningDate(false);
+    }
+  };
 
   const loadData = useCallback(async () => {
     try {
@@ -292,8 +367,27 @@ export default function EmployeeDetailClient() {
               <span className="font-semibold text-neutral-800">{employee.phone || '—'}</span>
             </div>
             <div>
-              <span className="text-[10px] uppercase font-bold text-neutral-400 block">Joining Date</span>
-              <span className="font-semibold text-neutral-800">{formatDate(employee.joiningDate)}</span>
+              <div className="flex items-center justify-between mb-0.5">
+                <span className="text-[10px] uppercase font-bold text-neutral-400 block">Joining Date</span>
+                {canEditJoiningDate && (
+                  <button
+                    type="button"
+                    onClick={handleOpenEditJoiningDate}
+                    className="inline-flex items-center gap-1 text-[11px] font-medium text-neutral-600 hover:text-neutral-900 px-1 py-0.5 rounded hover:bg-neutral-100 transition-colors"
+                    title="Edit Date of Joining"
+                  >
+                    <Pencil className="w-2.5 h-2.5 text-neutral-500" />
+                    <span>Edit</span>
+                  </button>
+                )}
+              </div>
+              <span className="font-semibold text-neutral-800">
+                {employee.joiningDate ? (
+                  formatDate(employee.joiningDate)
+                ) : (
+                  <span className="text-neutral-400 font-normal italic">Not set</span>
+                )}
+              </span>
             </div>
             <div>
               <span className="text-[10px] uppercase font-bold text-neutral-400 block">Department</span>
@@ -686,6 +780,74 @@ export default function EmployeeDetailClient() {
             </Button>
           </div>
         </div>
+      </Dialog>
+
+      {/* Edit Joining Date Dialog */}
+      <Dialog
+        isOpen={isEditJoiningDateOpen}
+        onClose={() => !isSavingJoiningDate && setIsEditJoiningDateOpen(false)}
+        title="Edit Date of Joining"
+        description={`Update official employment start date for ${employee?.displayName || employee?.firstName || 'this employee'}.`}
+        className="max-w-md"
+      >
+        <form onSubmit={handleSaveJoiningDate} className="space-y-4">
+          {joiningDateError && (
+            <div className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-700 flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 text-rose-600 flex-shrink-0 mt-0.5" />
+              <span>{joiningDateError}</span>
+            </div>
+          )}
+
+          {joiningDateSuccess && (
+            <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-700 flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+              <span>{joiningDateSuccess}</span>
+            </div>
+          )}
+
+          <div className="space-y-1.5">
+            <label className="text-xs font-semibold text-neutral-700 block">
+              Date of Joining <span className="text-neutral-400 font-normal">(Calendar Date)</span>
+            </label>
+            <input
+              type="date"
+              value={joiningDateInput}
+              onChange={(e) => setJoiningDateInput(e.target.value)}
+              disabled={isSavingJoiningDate}
+              max="2100-12-31"
+              min="1950-01-01"
+              className="w-full px-3 py-2 text-xs rounded-lg border border-neutral-300 focus:outline-none focus:ring-2 focus:ring-black focus:border-black bg-white disabled:bg-neutral-100 disabled:text-neutral-400 font-sans"
+            />
+            <p className="text-[11px] text-neutral-500">
+              Current saved date:{' '}
+              <strong className="text-neutral-800 font-semibold">
+                {employee?.joiningDate ? formatDate(employee.joiningDate) : 'Not set'}
+              </strong>
+            </p>
+          </div>
+
+          <div className="flex items-center justify-end gap-2 pt-3 border-t border-neutral-100">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={isSavingJoiningDate}
+              onClick={() => setIsEditJoiningDateOpen(false)}
+              className="text-xs"
+            >
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              size="sm"
+              isLoading={isSavingJoiningDate}
+              disabled={isSavingJoiningDate}
+              className="text-xs bg-neutral-900 hover:bg-black text-white"
+            >
+              Save Joining Date
+            </Button>
+          </div>
+        </form>
       </Dialog>
 
       {/* Access Control Modal */}

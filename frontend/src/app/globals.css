@@ -75,3 +75,17 @@
 ::-webkit-scrollbar-thumb:hover {
   background: #A3A3A3;
 }
+
+/* Global Print Styles */
+@media print {
+  header,
+  nav,
+  aside,
+  footer,
+  .no-print,
+  [data-no-print],
+  [role='banner'],
+  [role='navigation'] {
+    display: none !important;
+  }
+}

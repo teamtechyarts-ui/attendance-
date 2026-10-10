@@ -64,9 +64,17 @@ export default function VerifyIdClient() {
             <CardContent className="space-y-4 pt-2">
               <div className="p-4 rounded-lg bg-neutral-50 border border-neutral-200 space-y-3">
                 <div className="flex items-center gap-3">
-                  <div className="w-12 h-12 rounded-full bg-black text-white flex items-center justify-center font-bold text-sm">
-                    {(emp.displayName || emp.employeeCode || 'E').charAt(0).toUpperCase()}
-                  </div>
+                  {emp.profilePhotoUrl ? (
+                    <img
+                      src={emp.profilePhotoUrl}
+                      alt={emp.displayName || 'Employee'}
+                      className="w-12 h-12 rounded-full object-cover border border-neutral-300"
+                    />
+                  ) : (
+                    <div className="w-12 h-12 rounded-full bg-black text-white flex items-center justify-center font-bold text-sm">
+                      {(emp.displayName || emp.employeeCode || 'E').charAt(0).toUpperCase()}
+                    </div>
+                  )}
                   <div>
                     <h3 className="text-sm font-bold text-neutral-900">{emp.displayName || 'Employee'}</h3>
                     <p className="text-xs text-neutral-500 font-mono">{emp.employeeCode || ''}</p>

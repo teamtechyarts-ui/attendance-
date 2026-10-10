@@ -4,6 +4,8 @@ import React, { useState, useRef, useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useNotifications } from '@/hooks/use-notifications';
+import { useAuth } from '@/hooks/use-auth';
+import { isSuperAdmin } from '@/lib/permissions';
 import { NotificationItem } from '@/types';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -49,6 +51,8 @@ function formatRelativeTime(dateStr: string): string {
 
 export function NotificationPopover() {
   const router = useRouter();
+  const { user } = useAuth();
+  const notificationsHref = isSuperAdmin(user) ? '/admin/notifications' : '/notifications';
   const {
     notifications,
     unreadCount,
@@ -259,7 +263,7 @@ export function NotificationPopover() {
           {/* Footer */}
           <div className="p-2.5 border-t border-neutral-100 bg-neutral-50/80 text-center">
             <Link
-              href="/notifications"
+              href={notificationsHref}
               onClick={() => setIsOpen(false)}
               className="inline-flex items-center gap-1 text-xs font-bold text-neutral-800 hover:text-black transition-colors"
             >

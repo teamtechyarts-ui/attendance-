@@ -32,8 +32,17 @@ export class AttendanceService {
           },
         });
 
+        const formattedRecord = record
+          ? {
+              ...record,
+              status: ((record.notes?.includes('[WORKED_ON_HOLIDAY]') || (evaluation.isHoliday && record.checkInAt))
+                ? 'WORKED_ON_HOLIDAY'
+                : record.status) as AttendanceStatus,
+            }
+          : null;
+
         return {
-          record,
+          record: formattedRecord,
           workday: evaluation,
           date: todayStr,
         };
@@ -42,8 +51,20 @@ export class AttendanceService {
         const records = await DbService.restRequest<any[]>(
           `/attendance?employee_id=eq.${employeeId}&attendance_date=eq.${todayStr}&select=*,sessions:attendance_sessions(*)`
         );
+        const record = records?.[0] || null;
+        const checkInAt = record ? (record.checkInAt || record.check_in_at) : null;
+        const notes = record?.notes || '';
+        const formattedRecord = record
+          ? {
+              ...record,
+              status: ((notes.includes('[WORKED_ON_HOLIDAY]') || (evaluation.isHoliday && checkInAt))
+                ? 'WORKED_ON_HOLIDAY'
+                : record.status) as AttendanceStatus,
+            }
+          : null;
+
         return {
-          record: records?.[0] || null,
+          record: formattedRecord,
           workday: evaluation,
           date: todayStr,
         };
@@ -172,7 +193,10 @@ export class AttendanceService {
             actorId: userId,
           }).catch(() => {});
 
-          return attendance;
+          return {
+            ...attendance,
+            status,
+          };
         });
       },
       async () => {
@@ -190,19 +214,24 @@ export class AttendanceService {
           throw err;
         }
 
+        const dbStatus = status === 'WORKED_ON_HOLIDAY' ? 'PRESENT' : status;
+        const notesValue = status === 'WORKED_ON_HOLIDAY'
+          ? `[WORKED_ON_HOLIDAY]\n${input.notes || ''}`.trim()
+          : (input.notes || null);
+
         let attendance: any;
         if (existing) {
           const updated = await DbService.restRequest(`/attendance?id=eq.${existing.id}`, {
             method: 'PATCH',
             body: {
-              status,
+              status: dbStatus,
               work_mode: input.workMode,
               verification_method: input.verificationMethod,
               check_in_at: now.toISOString(),
               check_in_latitude: input.latitude || null,
               check_in_longitude: input.longitude || null,
               device_id: input.deviceId || null,
-              notes: input.notes || null,
+              notes: notesValue,
             },
           });
           attendance = updated[0];
@@ -212,14 +241,14 @@ export class AttendanceService {
             body: {
               employee_id: employeeId,
               attendance_date: todayStr,
-              status,
+              status: dbStatus,
               work_mode: input.workMode,
               verification_method: input.verificationMethod,
               check_in_at: now.toISOString(),
               check_in_latitude: input.latitude || null,
               check_in_longitude: input.longitude || null,
               device_id: input.deviceId || null,
-              notes: input.notes || null,
+              notes: notesValue,
             },
           });
           attendance = created[0];
@@ -257,7 +286,10 @@ export class AttendanceService {
           userAgent: clientInfo.userAgent,
         });
 
-        return attendance;
+        return {
+          ...attendance,
+          status,
+        };
       }
     );
 
@@ -302,6 +334,30 @@ export class AttendanceService {
             err.code = 'ATTENDANCE_ALREADY_CHECKED_OUT';
             throw err;
           }
+
+          // Atomically persist Daily Work Report within transaction
+          const dailyReport = await tx.dailyWorkReport.upsert({
+            where: {
+              employeeId_reportDate: {
+                employeeId,
+                reportDate: new Date(todayStr),
+              },
+            },
+            update: {
+              description: input.dailyWorkReport,
+              blockers: input.blockers || null,
+              status: 'SUBMITTED',
+              submittedAt: now,
+            },
+            create: {
+              employeeId,
+              reportDate: new Date(todayStr),
+              description: input.dailyWorkReport,
+              blockers: input.blockers || null,
+              status: 'SUBMITTED',
+              submittedAt: now,
+            },
+          });
 
           // Close active attendance session
           const activeSession = await tx.attendanceSession.findFirst({
@@ -429,6 +485,17 @@ export class AttendanceService {
           await AuditService.log({
             userId,
             employeeId,
+            action: 'REPORT_SUBMITTED',
+            entityType: 'daily_work_report',
+            entityId: dailyReport.id,
+            description: `Submitted daily work report at checkout for ${todayStr}`,
+            ipAddress: clientInfo.ipAddress,
+            userAgent: clientInfo.userAgent,
+          });
+
+          await AuditService.log({
+            userId,
+            employeeId,
             action: 'ATTENDANCE_CHECK_OUT',
             entityType: 'attendance',
             entityId: attendance.id,
@@ -439,6 +506,8 @@ export class AttendanceService {
 
           return {
             ...updated,
+            status: finalStatus,
+            dailyWorkReport: dailyReport,
             earnedLeaveCredited,
             timersAutoStopped,
           };
@@ -466,6 +535,21 @@ export class AttendanceService {
           err.code = 'ATTENDANCE_ALREADY_CHECKED_OUT';
           throw err;
         }
+
+        // Upsert Daily Work Report first
+        const reportRes = await DbService.restRequest<any[]>('/daily_work_reports?on_conflict=employee_id,report_date', {
+          method: 'POST',
+          headers: { Prefer: 'resolution=merge-duplicates,return=representation' },
+          body: {
+            employee_id: employeeId,
+            report_date: todayStr,
+            description: input.dailyWorkReport,
+            blockers: input.blockers || null,
+            status: 'SUBMITTED',
+            submitted_at: now.toISOString(),
+          },
+        });
+        const dailyReport = reportRes?.[0] || null;
 
         // Close active session in REST fallback
         const allSessions = await DbService.restRequest<any[]>(
@@ -545,10 +629,12 @@ export class AttendanceService {
 
         // Workday evaluation for holiday & duration policy
         const workday = await WorkdayService.evaluateDayForEmployee(employeeId, todayStr);
+        const currentNotes = attendance.notes || '';
+        const isHolidayWork = workday.isHoliday || attendance.status === 'WORKED_ON_HOLIDAY' || currentNotes.includes('[WORKED_ON_HOLIDAY]');
         let finalStatus = attendance.status;
         let earnedLeaveCredited = 0;
 
-        if (workday.isHoliday || attendance.status === 'WORKED_ON_HOLIDAY') {
+        if (isHolidayWork) {
           finalStatus = 'WORKED_ON_HOLIDAY';
           if (totalWorkMinutes >= 390) {
             await LeaveService.creditEarnedLeaveForHolidayWork(employeeId, todayStr, 1.0, userId, totalWorkMinutes);
@@ -563,16 +649,33 @@ export class AttendanceService {
           }
         }
 
+        const dbStatus = finalStatus === 'WORKED_ON_HOLIDAY' ? 'PRESENT' : finalStatus;
+        const updatedNotes = isHolidayWork && !currentNotes.includes('[WORKED_ON_HOLIDAY]')
+          ? `[WORKED_ON_HOLIDAY]\n${input.notes ? `${currentNotes}\n${input.notes}` : currentNotes}`.trim()
+          : (input.notes ? `${currentNotes}\n${input.notes}`.trim() : (currentNotes || null));
+
         const updated = await DbService.restRequest(`/attendance?id=eq.${attendance.id}`, {
           method: 'PATCH',
           body: {
-            status: finalStatus,
+            status: dbStatus,
             check_out_at: now.toISOString(),
             total_work_minutes: totalWorkMinutes,
+            notes: updatedNotes || null,
           },
         });
 
         console.log(`[AUTH] AUTH_WORK_SESSION_ENDED: userId=${userId}, employeeId=${employeeId}, attendanceId=${attendance.id}, totalWorkMinutes=${totalWorkMinutes}, earnedLeaveCredited=${earnedLeaveCredited}, timestamp=${now.toISOString()}`);
+
+        await AuditService.log({
+          userId,
+          employeeId,
+          action: 'REPORT_SUBMITTED',
+          entityType: 'daily_work_report',
+          entityId: dailyReport?.id || '',
+          description: `Submitted daily work report at checkout for ${todayStr}`,
+          ipAddress: clientInfo.ipAddress,
+          userAgent: clientInfo.userAgent,
+        });
 
         await AuditService.log({
           userId,
@@ -586,7 +689,9 @@ export class AttendanceService {
         });
 
         return {
-          ...updated[0],
+          ...(updated?.[0] || attendance),
+          status: finalStatus,
+          dailyWorkReport: dailyReport,
           earnedLeaveCredited,
           timersAutoStopped,
         };
@@ -645,6 +750,16 @@ export class AttendanceService {
           leaveByEmpId.set(l.employeeId, l);
         }
 
+        const [y, m, d] = todayStr.split('-').map(Number);
+        const todayHoliday = await prisma.holiday.findFirst({
+          where: {
+            holidayDate: {
+              gte: new Date(Date.UTC(y, m - 1, d, 0, 0, 0, 0)),
+              lte: new Date(Date.UTC(y, m - 1, d, 23, 59, 59, 999)),
+            },
+          },
+        });
+
         return employees.map((emp) => {
           const todayAtt = emp.attendances[0];
           const todayLeave = leaveByEmpId.get(emp.id);
@@ -657,13 +772,17 @@ export class AttendanceService {
           let isOnLeave = Boolean(todayLeave);
 
           if (todayAtt && todayAtt.checkInAt) {
-            attendanceStatus = todayAtt.status;
+            attendanceStatus = (todayAtt.notes?.includes('[WORKED_ON_HOLIDAY]') || todayHoliday)
+              ? 'WORKED_ON_HOLIDAY'
+              : todayAtt.status;
             workMode = todayAtt.workMode;
             checkInAt = todayAtt.checkInAt.toISOString();
             checkOutAt = todayAtt.checkOutAt ? todayAtt.checkOutAt.toISOString() : null;
             isCheckedIn = !todayAtt.checkOutAt;
           } else if (todayLeave) {
             attendanceStatus = 'ON_LEAVE';
+          } else if (todayHoliday) {
+            attendanceStatus = 'HOLIDAY';
           }
 
           // Find current active task & timer
@@ -721,7 +840,7 @@ export class AttendanceService {
       },
       async () => {
         // REST Fallback
-        const [rawEmployees, attendances, leaves, tasks] = await Promise.all([
+        const [rawEmployees, attendances, leaves, tasks, todayHols] = await Promise.all([
           DbService.restRequest<any[]>(
             `/employees?employment_status=eq.ACTIVE&select=*,department:departments(*),designation:designations(*),user:users(role)`
           ),
@@ -734,8 +853,12 @@ export class AttendanceService {
           DbService.restRequest<any[]>(
             `/tasks?status=in.(TODO,IN_PROGRESS,PAUSED)&select=*,timers:task_timers(*)`
           ).catch(() => []),
+          DbService.restRequest<any[]>(
+            `/holidays?holiday_date=eq.${todayStr}`
+          ).catch(() => []),
         ]);
 
+        const hasTodayHoliday = Boolean(todayHols && todayHols.length > 0);
         const employees = (rawEmployees || []).filter((e) => e.user?.role !== 'SUPER_ADMIN');
 
         const attByEmpId = new Map<string, any>();
@@ -787,9 +910,13 @@ export class AttendanceService {
 
           let attendanceStatus: AttendanceStatus | 'NOT_MARKED' = 'NOT_MARKED';
           if (hasCheckIn) {
-            attendanceStatus = todayAtt.status || 'PRESENT';
+            attendanceStatus = (todayAtt?.notes?.includes('[WORKED_ON_HOLIDAY]') || hasTodayHoliday)
+              ? 'WORKED_ON_HOLIDAY'
+              : (todayAtt.status || 'PRESENT');
           } else if (isOnLeave) {
             attendanceStatus = 'ON_LEAVE';
+          } else if (hasTodayHoliday) {
+            attendanceStatus = 'HOLIDAY';
           }
 
           return {
@@ -1264,8 +1391,8 @@ export class AttendanceService {
 
             // Authoritative Status Resolution (Only historical & today records exist)
             let status: AttendanceStatus | 'LEAVE' | 'OFF';
-            if (evalResult.isHoliday) {
-              status = att?.checkInAt ? (att.status === 'WORKED_ON_HOLIDAY' ? 'WORKED_ON_HOLIDAY' : 'WORKED_ON_HOLIDAY') : 'HOLIDAY';
+            if (evalResult.isHoliday || att?.notes?.includes('[WORKED_ON_HOLIDAY]')) {
+              status = att?.checkInAt ? 'WORKED_ON_HOLIDAY' : 'HOLIDAY';
             } else if (!evalResult.isWorkingDay) {
               status = att?.checkInAt ? (att.status as AttendanceStatus) : 'OFF';
             } else if (matchingLeave) {
@@ -1450,8 +1577,8 @@ export class AttendanceService {
             });
 
             let status: AttendanceStatus | 'LEAVE' | 'OFF';
-            if (evalResult.isHoliday) {
-              status = att?.checkInAt ? (att.status === 'WORKED_ON_HOLIDAY' ? 'WORKED_ON_HOLIDAY' : 'WORKED_ON_HOLIDAY') : 'HOLIDAY';
+            if (evalResult.isHoliday || att?.notes?.includes('[WORKED_ON_HOLIDAY]')) {
+              status = att?.checkInAt ? 'WORKED_ON_HOLIDAY' : 'HOLIDAY';
             } else if (!evalResult.isWorkingDay) {
               status = att?.checkInAt ? att.status : 'OFF';
             } else if (matchingLeave) {

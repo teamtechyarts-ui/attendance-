@@ -82,6 +82,17 @@ export class EmailService {
    */
   public static getTransporter(): Transporter {
     if (!this.transporterInstance) {
+      if (process.env.NODE_ENV === 'test' || process.env.EMAIL_SIMULATE === 'true') {
+        this.transporterInstance = {
+          verify: async () => true,
+          sendMail: async (opts: any) => ({
+            messageId: `<simulated-${Date.now()}@test.local>`,
+            response: '250 Simulated Delivery (Test Mode)',
+          }),
+        } as any;
+        return this.transporterInstance as Transporter;
+      }
+
       const transportConfig: any = {
         host: config.smtpHost,
         port: config.smtpPort,
@@ -135,8 +146,10 @@ export class EmailService {
     }
   }
 
+  private static recentEmailDispatches = new Map<string, number>();
+
   /**
-   * Send a general email
+   * Send a general email with test mode simulation and deduplication
    */
   public static async sendEmail(options: SendEmailOptions): Promise<EmailSendResult> {
     const rawRecipients = Array.isArray(options.to) ? options.to : [options.to];
@@ -156,10 +169,33 @@ export class EmailService {
     }
 
     const maskedRecipients = this.maskEmail(validRecipients);
+    const isTestEnvironment =
+      process.env.NODE_ENV === 'test' ||
+      process.env.EMAIL_SIMULATE === 'true' ||
+      validRecipients.some((r) => r.endsWith('@example.com') || r.endsWith('@test.com') || r.includes('test_user_'));
 
-    // If email is globally disabled or SMTP is unconfigured, log and simulate
-    if (!config.emailEnabled || !config.smtpHost) {
-      console.log(`[EmailService] [email.send.skipped] (Disabled/Simulated) To: ${maskedRecipients} | Subject: "${options.subject}"`);
+    // Strict idempotency: Prevent resending exact same email to same recipients within 60s
+    const dedupKey = `${validRecipients.sort().join(',')}:${options.subject}:${options.notificationId || ''}`;
+    const now = Date.now();
+    const lastSent = this.recentEmailDispatches.get(dedupKey);
+    if (lastSent && now - lastSent < 60000) {
+      console.log(`[EmailService] [email.send.deduplicated] To: ${maskedRecipients} | Subject: "${options.subject}" (Suppressed duplicate dispatch)`);
+      return { success: true, skipped: true, messageId: 'deduplicated' };
+    }
+    this.recentEmailDispatches.set(dedupKey, now);
+
+    // Prune cache periodically
+    if (this.recentEmailDispatches.size > 1000) {
+      for (const [k, ts] of this.recentEmailDispatches.entries()) {
+        if (now - ts > 120000) {
+          this.recentEmailDispatches.delete(k);
+        }
+      }
+    }
+
+    // If email is disabled, SMTP unconfigured, or in test environment, simulate safely
+    if (!config.emailEnabled || !config.smtpHost || isTestEnvironment) {
+      console.log(`[EmailService] [email.send.skipped] (${isTestEnvironment ? 'Test/Simulated' : 'Disabled'}) To: ${maskedRecipients} | Subject: "${options.subject}"`);
       if (options.notificationId) {
         await this.recordDelivery({
           notificationId: options.notificationId,
